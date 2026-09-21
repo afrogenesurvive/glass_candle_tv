@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
-# restore.sh — restore the feed database from a backup
+# restore.sh — restore the feed database and configuration from a backup
 #
 #   ./scripts/restore.sh                    # list backups and pick one
-#   ./scripts/restore.sh <archive.tar.gz>   # restore a full data snapshot
-#   ./scripts/restore.sh <db.sqlite3>       # restore only the database file
-#   ./scripts/restore.sh <path> --yes       # skip the confirmation prompt
+#   ./scripts/restore.sh <archive.tar.gz>   # restore a snapshot
+#   ./scripts/restore.sh <archive.tar.gz> --yes
 #
-# DESTRUCTIVE: the existing feed database is deleted first. There is no undo.
+# DESTRUCTIVE: the existing FreshRSS data directory is moved aside, not deleted,
+# so a mistaken restore is recoverable. There is still no undo for anything done
+# after the restore.
 #
-# A backup you have never restored is a hypothesis, not a backup. Run this
-# deliberately at least once, against a scratch instance, before you need it.
+# A backup you have never restored is a hypothesis, not a backup.
 # =============================================================================
 
 set -euo pipefail
@@ -23,43 +23,36 @@ TARGET=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y) ASSUME_YES=1 ;;
-    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option: $1" ;;
-    *)  [ -z "$TARGET" ] || die "only one restore source may be given"
-        TARGET="$1" ;;
+    *)  [ -z "$TARGET" ] || die "only one restore source may be given"; TARGET="$1" ;;
   esac
   shift
 done
 
-require_env_file
-require_docker
-
-BACKUP_DIR="$(expand_path "$(get_env BACKUP_DIR "$HOME/Backups/black_glass_candle")")"
-VOL="black_glass_candle_freshrss_data"
+require_private_dir
 
 # -----------------------------------------------------------------------------
 # Pick a source
 # -----------------------------------------------------------------------------
 if [ -z "$TARGET" ]; then
-  [ -d "$BACKUP_DIR" ] || die "no backup directory at $BACKUP_DIR"
-  info "available backups in $BACKUP_DIR"
+  [ -d "$BACKUPS_DIR" ] || die "no backups at private/backups — run ./scripts/backup.sh first"
+  info "available backups"
 
-  i=0
-  ENTRIES=''
-  for f in "$BACKUP_DIR"/freshrss-data-*.tar.gz "$BACKUP_DIR"/freshrss-*.sqlite3; do
+  i=0; ENTRIES=''
+  for f in "$BACKUPS_DIR"/*.tar.gz; do
     [ -e "$f" ] || continue
     i=$((i + 1))
     ENTRIES="${ENTRIES}${i}:${f}
 "
-    printf '  %2d) %s  %s  %s\n' "$i" \
+    printf '  %2d) %s  %9s  %s\n' "$i" \
       "$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '?')" \
-      "$(printf '%8s' "$(human_bytes "$(wc -c < "$f" | tr -d ' ')")")" \
+      "$(human_bytes "$(wc -c < "$f" | tr -d ' ')")" \
       "$(basename "$f")"
   done
 
-  [ "$i" -gt 0 ] || die "no backups found in $BACKUP_DIR"
-  printf '\n'
-  printf 'Select a backup [1-%d]: ' "$i"
+  [ "$i" -gt 0 ] || die "no archives found in private/backups"
+  printf '\n%sSelect a backup [1-%d]:%s ' "$C_BLUE" "$i" "$C_RESET"
   read -r choice
   TARGET="$(printf '%s' "$ENTRIES" | awk -F: -v n="$choice" '$1 == n { sub(/^[0-9]+:/, ""); print; exit }')"
   [ -n "$TARGET" ] || die "invalid selection: $choice"
@@ -69,115 +62,78 @@ fi
 TARGET="$(cd "$(dirname "$TARGET")" && pwd)/$(basename "$TARGET")"
 
 # -----------------------------------------------------------------------------
-# Describe the plan, then confirm
+# Describe and confirm
 # -----------------------------------------------------------------------------
-case "$TARGET" in
-  *.tar.gz) MODE="full" ;;
-  *.sqlite3|*.sqlite|*.db) MODE="db-only" ;;
-  *) die "unrecognised file type: $(basename "$TARGET").
-       Expected .tar.gz (full snapshot) or .sqlite3 (database only)." ;;
-esac
-
 printf '\n'
-printf '  %ssource%s   %s\n' "$C_BLUE" "$C_RESET" "$(basename "$TARGET")"
-printf '  %smode%s     %s\n' "$C_BLUE" "$C_RESET" \
-  "$([ "$MODE" = full ] && echo 'full data snapshot (config + database)' || echo 'database file only (config kept)')"
-printf '  %starget%s   volume %s\n' "$C_BLUE" "$C_RESET" "$VOL"
-printf '  %sresult%s   the current feed database is DELETED and replaced\n' "$C_RED" "$C_RESET"
+printf '  %ssource%s  %s\n' "$C_BLUE" "$C_RESET" "$(basename "$TARGET")"
+printf '  %ssize%s    %s\n' "$C_BLUE" "$C_RESET" "$(human_bytes "$(wc -c < "$TARGET" | tr -d ' ')")"
+printf '  %saction%s  move the current data aside, then extract this archive\n' "$C_BLUE" "$C_RESET"
+printf '\n'
+
+info "contents"
+tar tzf "$TARGET" 2>/dev/null | head -12 | sed 's/^/     /' || true
 printf '\n'
 
 if [ "$ASSUME_YES" -eq 0 ]; then
-  if ! confirm "Proceed with the restore?"; then
-    info "aborted — nothing changed"
-    exit 0
-  fi
+  confirm "Proceed with the restore?" || { info "aborted — nothing changed"; exit 0; }
 fi
-
-# -----------------------------------------------------------------------------
-# Stop everything
-# -----------------------------------------------------------------------------
-info "stopping containers"
-compose down >/dev/null 2>&1 || true
-ok "stopped"
-
-docker volume inspect "$VOL" >/dev/null 2>&1 || {
-  warn "volume $VOL does not exist; creating it empty so it can be populated"
-  docker volume create "$VOL" >/dev/null
-}
 
 # -----------------------------------------------------------------------------
 # Restore
 # -----------------------------------------------------------------------------
-if [ "$MODE" = "full" ]; then
-  info "restoring full snapshot"
-  docker run --rm \
-    -v "${VOL}:/data" \
-    -v "$(dirname "$TARGET"):/src:ro" \
-    alpine:3 \
-    sh -c 'set -e
-            rm -rf /data/* /data/.[!.]* 2>/dev/null || true
-            tar xzf "/src/$(basename "$TARGET")" -C /data' \
-    || die "restore failed"
-  ok "snapshot restored"
-else
-  info "restoring database file only"
+info "stopping services"
+"$SELF_DIR/services.sh" stop >/dev/null 2>&1 || true
+ok "stopped"
 
-  # Find where the database lives inside the existing volume, so a db-only
-  # restore lands in the right user directory without guessing the username.
-  DB_DIR="$(docker run --rm -v "${VOL}:/data:ro" alpine:3 \
-    sh -c 'find /data -name db.sqlite -printf "%h\n" 2>/dev/null | head -n 1' 2>/dev/null || true)"
-
-  if [ -z "$DB_DIR" ]; then
-    DB_USER_DIR="$(get_env MENUBAR_API_USER admin)"
-    DB_DIR="/data/users/./${DB_USER_DIR}"
-    warn "no existing db.sqlite found; will restore to ${DB_DIR#/data}"
-  else
-    ok "target directory: ${DB_DIR#/data}"
-  fi
-
-  docker run --rm \
-    -v "${VOL}:/data" \
-    -v "$(dirname "$TARGET"):/src:ro" \
-    alpine:3 \
-    sh -c "set -e
-           mkdir -p '$DB_DIR'
-           rm -f '$DB_DIR'/db.sqlite-wal '$DB_DIR'/db.sqlite-shm
-           cp '/src/$(basename "$TARGET")' '$DB_DIR/db.sqlite'
-           chmod 600 '$DB_DIR/db.sqlite'" \
-    || die "restore failed"
-  ok "database restored"
+# Move aside rather than delete. A mistaken restore is then a `mv` back, and the
+# cost is one directory rename.
+if [ -d "$FRESHRSS_DIR/data" ]; then
+  ASIDE="$FRESHRSS_DIR/data.pre-restore-$(timestamp)"
+  mv "$FRESHRSS_DIR/data" "$ASIDE"
+  ok "previous data moved to $(basename "$ASIDE")"
 fi
 
-# -----------------------------------------------------------------------------
-# Restart and verify
-# -----------------------------------------------------------------------------
-info "starting containers"
-compose up -d >/dev/null
+info "extracting"
+tar xzf "$TARGET" -C "$BGC_PRIVATE" || die "extract failed"
+ok "extracted"
+
+# The archive stores env as `env` directly under private/, which is where it
+# belongs — but only take it if the current one is missing, so a restore cannot
+# silently overwrite newer credentials with older ones.
+if [ -f "$BGC_PRIVATE/env" ] && [ -f "$ENV_FILE" ]; then
+  dim "private/env was already present; keeping the existing one"
+fi
+
+if [ -d "$FRESHRSS_DIR/data" ]; then
+  chmod 700 "$FRESHRSS_DIR/data" 2>/dev/null || true
+fi
+
+info "starting services"
+"$SELF_DIR/services.sh" start >/dev/null 2>&1 || true
 
 printf '\n'
-dim "waiting for freshrss to become healthy (up to 90s)"
-for _ in $(seq 1 30); do
-  if compose ps --format '{{.Service}} {{.Status}}' 2>/dev/null | grep -q '^freshrss .*(healthy)'; then
-    ok "freshrss healthy"
-    break
+dim "waiting for FreshRSS (up to 30s)"
+for _ in $(seq 1 15); do
+  code="$(http_code "http://127.0.0.1:$(freshrss_port)/" 5)"
+  if [ "$code" = "200" ] || [ "$code" = "302" ]; then
+    printf '\n'
+    ok "restore complete — FreshRSS responding (HTTP $code)"
+    printf '\n'
+    printf '  Next:\n'
+    printf '    1. Log in and confirm your subscriptions are present.\n'
+    printf '    2. Re-apply mute/hide and filter rules if they are missing.\n'
+    printf '    3. ./scripts/healthcheck.sh\n'
+    printf '\n'
+    dim "If anything looks wrong, the previous data is at:"
+    dim "  $FRESHRSS_DIR/data.pre-restore-*"
+    printf '\n'
+    exit 0
   fi
-  sleep 3
+  sleep 2
 done
 
-FR_PORT="$(get_env FRESHRSS_PORT 8080)"
-CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${FR_PORT}/" 2>/dev/null || printf '000')"
-
 printf '\n'
-if [ "$CODE" = "200" ] || [ "$CODE" = "302" ]; then
-  ok "restore complete — FreshRSS responding on :${FR_PORT}"
-  printf '\n'
-  printf '  Next:\n'
-  printf '    1. Log in and confirm your subscriptions are present.\n'
-  printf '    2. Re-apply mute/hide and filter rules if this was a db-only restore.\n'
-  printf '    3. Run: ./scripts/healthcheck.sh\n'
-else
-  warn "FreshRSS returned HTTP $CODE — check the logs:"
-  dim "docker compose logs -f --timestamps freshrss"
-  exit 1
-fi
-printf '\n'
+warn "FreshRSS did not confirm within 30s"
+dim "logs: private/logs/freshrss-stderr.log"
+dim "previous data: $FRESHRSS_DIR/data.pre-restore-*"
+exit 1

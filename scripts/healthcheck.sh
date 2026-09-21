@@ -3,9 +3,9 @@
 # healthcheck.sh — one-shot status of the whole stack
 #
 #   ./scripts/healthcheck.sh
-#   ./scripts/healthcheck.sh --quiet    # only failures
+#   ./scripts/healthcheck.sh --quiet    # only problems
 #
-# Exit codes:  0 = all good (warnings allowed)   1 = at least one FAIL
+# Exit codes:  0 = no failures (warnings allowed)   1 = at least one FAIL
 # =============================================================================
 
 set -euo pipefail
@@ -29,92 +29,101 @@ fail() { printf '%s  FAIL%s %s\n' "$C_RED" "$C_RESET" "$*"; FAILS=$((FAILS + 1))
 note() { printf '%s  WARN%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; WARNS=$((WARNS + 1)); }
 skip() { [ "$QUIET" -eq 1 ] || printf '%s  ----%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
 
-http_code() { # http_code URL [timeout]
-  curl -s -o /dev/null -w '%{http_code}' --max-time "${2:-5}" "$1" 2>/dev/null || printf '000'
-}
-
-printf '\n%sblack_glass_candle — healthcheck%s\n\n' "$C_BLUE" "$C_RESET"
+printf '\n%sglass_candle_tv — healthcheck%s\n\n' "$C_BLUE" "$C_RESET"
 
 # -----------------------------------------------------------------------------
-# 1. Prerequisites
+# 1. Layout and privacy
 # -----------------------------------------------------------------------------
-info "prerequisites"
+info "layout"
 
-if [ ! -f "$ENV_FILE" ]; then
-  fail ".env missing — Fix: cp .env.example .env"
-  printf '\n%sNothing else can be checked without .env.%s\n\n' "$C_RED" "$C_RESET"
-  exit 1
-fi
-pass ".env present"
-
-if ! command -v docker >/dev/null 2>&1; then
-  fail "docker not on PATH — install Docker Desktop / OrbStack / colima"
-  printf '\n'
-  exit 1
-fi
-if ! docker info >/dev/null 2>&1; then
-  fail "Docker daemon not running — start Docker Desktop"
-  printf '\n'
-  exit 1
-fi
-pass "docker daemon reachable"
-
-# The single most common way to leak credentials is a .gitignore regression.
-if git -C "$BGC_ROOT" check-ignore -q --no-index .env 2>/dev/null; then
-  pass ".env is gitignored"
+if [ -d "$BGC_PRIVATE" ]; then
+  pass "private/ exists"
 else
-  fail ".env is NOT gitignored — fix .gitignore before committing anything"
+  fail "private/ is missing — run: ./scripts/install.sh"
+  printf '\n'
+  exit 1
+fi
+
+# This is the invariant the whole design rests on. If private/ ever stops being
+# ignored, every secret and the entire feed database become committable.
+if git -C "$BGC_ROOT" check-ignore -q --no-index "private/env" 2>/dev/null; then
+  pass "private/ is gitignored"
+else
+  fail "private/ is NOT gitignored — fix .gitignore immediately"
+fi
+
+if [ -f "$ENV_FILE" ]; then
+  pass "private/env present ($(stat -f '%Sp' "$ENV_FILE" 2>/dev/null || echo '?'))"
+else
+  fail "private/env is missing — run: cp .env.example private/env"
+fi
+
+# The single most important security property: the feed database must not be
+# reachable over HTTP. Assert the invariant, not just the intent.
+if [ -d "$FRESHRSS_DIR/data" ]; then
+  case "$FRESHRSS_DIR/data" in
+    "$FRESHRSS_DIR/p"/*) fail "FreshRSS data/ is INSIDE the web docroot — it is being served" ;;
+    *)                   pass "FreshRSS data/ is outside the web docroot" ;;
+  esac
+else
+  skip "FreshRSS data/ does not exist yet"
 fi
 
 # -----------------------------------------------------------------------------
-# 2. Configuration sanity
+# 2. Configuration
 # -----------------------------------------------------------------------------
 info "configuration"
 
-CRON_MIN="$(get_env CRON_MIN)"
-if [ -z "$CRON_MIN" ]; then
-  fail "CRON_MIN is empty — feeds will NEVER refresh"
-  dim "set CRON_MIN=13,43 in .env and run: docker compose up -d"
-else
-  pass "CRON_MIN=$CRON_MIN"
-fi
-
-TZ_VAL="$(get_env TZ)"
-if [ -z "$TZ_VAL" ] || [ "$TZ_VAL" = "UTC" ]; then
-  note "TZ is unset or UTC — feed timestamps and 'today' filters may be off"
-else
-  pass "TZ=$TZ_VAL"
-fi
-
-ALLOW="$(get_env INTERNAL_HOST_ALLOWLIST)"
-case "$ALLOW" in
-  *rss-bridge*) pass "INTERNAL_HOST_ALLOWLIST permits rss-bridge" ;;
-  *)            note "INTERNAL_HOST_ALLOWLIST does not mention rss-bridge — bridged feeds will fail to fetch" ;;
-esac
-
-ADDR="$(get_env BIND_ADDR 127.0.0.1)"
-if [ "$ADDR" = "0.0.0.0" ]; then
-  note "BIND_ADDR=0.0.0.0 — the login page is reachable from your whole network"
-else
-  pass "BIND_ADDR=$ADDR (loopback only)"
-fi
-
-# -----------------------------------------------------------------------------
-# 3. Containers
-# -----------------------------------------------------------------------------
-info "containers"
-
-for svc in freshrss rss-bridge; do
-  state="$(compose ps --format '{{.Service}} {{.State}} {{.Status}}' 2>/dev/null | grep "^${svc} " || true)"
-  if [ -z "$state" ]; then
-    fail "$svc is not created — run: docker compose up -d"
-  elif printf '%s' "$state" | grep -q "(healthy)"; then
-    pass "$svc healthy"
-  elif printf '%s' "$state" | grep -q "Up"; then
-    note "$svc up but not yet healthy — $(printf '%s' "$state" | cut -d' ' -f3-)"
+if [ -f "$ENV_FILE" ]; then
+  missing=''
+  for v in ADMIN_API_PASSWORD RSSBRIDGE_TOKEN; do
+    [ -n "$(get_env "$v")" ] || missing="${missing}${v} "
+  done
+  if [ -n "$missing" ]; then
+    fail "empty API secrets in private/env: ${missing}"
   else
-    fail "$svc not running — $(printf '%s' "$state" | cut -d' ' -f3-)"
+    pass "API secrets present"
   fi
+
+  if [ -z "$(get_env ADMIN_PASSWORD)" ]; then
+    note "ADMIN_PASSWORD is empty — the admin account has not been created"
+    dim "set it in private/env and re-run ./scripts/install.sh"
+  else
+    pass "ADMIN_PASSWORD set"
+  fi
+
+  if [ -z "$(get_env CRON_MIN)" ]; then
+    fail "CRON_MIN is empty — feeds will NEVER refresh"
+  else
+    pass "CRON_MIN=$(get_env CRON_MIN) (feeds refresh on this schedule)"
+  fi
+
+  tz_val="$(get_env TZ)"
+  if [ -z "$tz_val" ] || [ "$tz_val" = "UTC" ]; then
+    note "TZ is unset or UTC — feed timestamps may be shifted"
+  else
+    pass "TZ=$tz_val"
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# 3. Toolchain and services
+# -----------------------------------------------------------------------------
+info "services"
+
+if command -v php >/dev/null 2>&1; then
+  pass "PHP $PHP_VER"
+else
+  fail "php not on PATH"
+fi
+
+for svc in freshrss rssbridge refresh; do
+  state="$(agent_state "$svc")"
+  case "$state" in
+    running)    pass "$svc: running" ;;
+    loaded)     [ "$svc" = "refresh" ] && pass "$svc: scheduled" || note "$svc: loaded but not running" ;;
+    not-loaded) fail "$svc: not loaded — run ./scripts/services.sh install" ;;
+  esac
 done
 
 # -----------------------------------------------------------------------------
@@ -122,97 +131,121 @@ done
 # -----------------------------------------------------------------------------
 info "endpoints"
 
-FR_PORT="$(get_env FRESHRSS_PORT 8080)"
-RB_PORT="$(get_env RSSBRIDGE_PORT 3000)"
+FR_PORT="$(freshrss_port)"
+RB_PORT="$(rssbridge_port)"
 
-FR_CODE="$(http_code "http://127.0.0.1:${FR_PORT}/")"
-case "$FR_CODE" in
-  200|302) pass "FreshRSS responds on :${FR_PORT} (HTTP $FR_CODE)" ;;
-  000)     fail "FreshRSS not reachable on :${FR_PORT}" ;;
-  *)       fail "FreshRSS returned HTTP $FR_CODE on :${FR_PORT}" ;;
-esac
+for spec in "FreshRSS:$FR_PORT:$FRESHRSS_DIR/p" "RSS-Bridge:$RB_PORT:$RSSBRIDGE_DIR"; do
+  name="${spec%%:*}"; rest="${spec#*:}"; port="${rest%%:*}"; docroot="${rest#*:}"
 
-RB_CODE="$(http_code "http://127.0.0.1:${RB_PORT}/")"
-case "$RB_CODE" in
-  200|302) pass "RSS-Bridge responds on :${RB_PORT} (HTTP $RB_CODE)" ;;
-  000)     fail "RSS-Bridge not reachable on :${RB_PORT}" ;;
-  *)       fail "RSS-Bridge returned HTTP $RB_CODE on :${RB_PORT}" ;;
-esac
+  if [ ! -d "$docroot" ]; then
+    fail "$name: docroot missing ($docroot) — not cloned?"
+    continue
+  fi
+  if ! port_listening "$port"; then
+    fail "$name: nothing listening on :$port"
+    continue
+  fi
 
-# Token auth must be ON, and must actually reject a bad token. A bridge that
-# answers 200 to a wrong token is an open URL fetcher.
+  code="$(http_code "http://127.0.0.1:$port/" 10)"
+  if [ "$code" = "200" ] || [ "$code" = "302" ]; then
+    pass "$name answering on :$port (HTTP $code)"
+  elif [ "$code" = "401" ]; then
+    # Not a problem — it is the strongest signal available: the service is up
+    # AND token authentication is being enforced.
+    pass "$name answering on :$port (HTTP 401 — token auth enforced)"
+  elif [ "$code" = "000" ]; then
+    fail "$name: port open but no HTTP response"
+  else
+    note "$name returned HTTP $code on :$port"
+  fi
+done
+
+# Token auth must be ON and must actually reject a wrong token. A bridge that
+# answers 200 to a bad token is an open URL fetcher for anything on this machine.
 TOKEN="$(get_env RSSBRIDGE_TOKEN)"
 if [ -z "$TOKEN" ]; then
-  note "RSSBRIDGE_TOKEN empty — cannot verify bridge authentication"
-elif [ "$RB_CODE" = "000" ]; then
+  note "RSSBRIDGE_TOKEN empty — cannot verify bridge auth"
+elif ! port_listening "$RB_PORT"; then
   skip "RSS-Bridge unreachable — skipping token check"
 else
-  GOOD="$(http_code "http://127.0.0.1:${RB_PORT}/?action=display&bridge=HackerNewsBridge&format=Atom&token=${TOKEN}" 10)"
-  BAD="$(http_code "http://127.0.0.1:${RB_PORT}/?action=display&bridge=HackerNewsBridge&format=Atom&token=definitely-wrong" 10)"
+  # A bridge that definitely ships with RSS-Bridge, so a 404 cannot be mistaken
+  # for "auth disabled". An unknown bridge name 404s *before* the token check
+  # runs, which would make this test unable to fail.
+  PROBE_BRIDGE="CssSelectorBridge"
+  GOOD="$(http_code "http://127.0.0.1:$RB_PORT/?action=display&bridge=$PROBE_BRIDGE&format=Atom&token=${TOKEN}" 20)"
+  BAD="$(http_code "http://127.0.0.1:$RB_PORT/?action=display&bridge=$PROBE_BRIDGE&format=Atom&token=definitely-wrong" 20)"
   if [ "$BAD" = "200" ]; then
-    fail "RSS-Bridge ACCEPTED a wrong token — authentication is disabled"
-  elif [ "$GOOD" = "200" ]; then
-    pass "RSS-Bridge token auth working (good=$GOOD bad=$BAD)"
+    fail "RSS-Bridge ACCEPTED a wrong token — authentication is NOT being enforced"
+    dim "most likely cause: config.ini.php is not in the RSS-Bridge root directory"
+    dim "regenerate with: ./scripts/gen-configs.sh"
+  elif [ "$BAD" = "401" ] || [ "$BAD" = "403" ]; then
+    pass "RSS-Bridge token auth enforced (bad token -> $BAD)"
   else
-    note "RSS-Bridge good-token request returned $GOOD (bad=$BAD) — bridge may be rate-limited"
+    note "token check inconclusive: bad token returned $BAD (expected 401/403)"
   fi
 fi
 
-# FreshRSS API: 503 here almost always means the Authentication toggle is off.
-API_BASE_URL="$(get_env MENUBAR_API_BASE_URL)"
-if [ -z "$API_BASE_URL" ]; then
-  note "MENUBAR_API_BASE_URL not set — cannot check the API"
+# FreshRSS API. Before an account exists this is expected to fail; that is
+# different from it being broken.
+API_URL="$(freshrss_api_url)"
+if [ ! -d "$FRESHRSS_DIR/data/users" ]; then
+  skip "FreshRSS API: no user yet — complete setup in the browser first"
 else
-  CODE="$(http_code "${API_BASE_URL%/}/" 10)"
+  CODE="$(http_code "$API_URL/" 10)"
   case "$CODE" in
     200) pass "FreshRSS API endpoint reachable" ;;
     503) fail "FreshRSS API returned 503 — enable 'Allow API access' under Authentication" ;;
-    000) fail "FreshRSS API not reachable at $API_BASE_URL" ;;
+    000) fail "FreshRSS API not reachable at $API_URL" ;;
     *)   note "FreshRSS API returned HTTP $CODE" ;;
   esac
 fi
 
 # -----------------------------------------------------------------------------
-# 5. Storage
+# 5. Refresh job and backups
 # -----------------------------------------------------------------------------
-info "storage"
+info "maintenance"
 
-VOL="black_glass_candle_freshrss_data"
-SIZE_BYTES="$(docker run --rm -v "${VOL}:/d:ro" alpine:3 du -sb /d 2>/dev/null | awk '{print $1}' || true)"
-if [ -n "$SIZE_BYTES" ]; then
-  pass "feed database volume: $(human_bytes "$SIZE_BYTES")"
-else
-  skip "could not measure volume $VOL (not created yet?)"
-fi
-
-BACKUP_DIR="$(expand_path "$(get_env BACKUP_DIR "$HOME/Backups/black_glass_candle")")"
-if [ -d "$BACKUP_DIR" ]; then
-  COUNT="$(find "$BACKUP_DIR" -name 'freshrss-*.tar.gz' 2>/dev/null | wc -l | tr -d ' ')"
-  if [ "$COUNT" -gt 0 ]; then
-    pass "$COUNT backup(s) in $BACKUP_DIR"
+if [ -f "$LOGS_DIR/refresh.log" ]; then
+  last="$(grep -c 'exit 0 — ok' "$LOGS_DIR/refresh.log" 2>/dev/null || echo 0)"
+  if [ "$last" -gt 0 ]; then
+    pass "feed refresh has run successfully ($last time(s) logged)"
   else
-    note "no backups yet in $BACKUP_DIR — run ./scripts/backup.sh"
+    note "refresh has run but never succeeded — see private/logs/refresh.log"
   fi
 else
-  note "no backup directory at $BACKUP_DIR — run ./scripts/backup.sh"
+  note "feed refresh has not run yet — see private/logs/refresh.log"
 fi
 
-# -----------------------------------------------------------------------------
-# 6. Menubar app
-# -----------------------------------------------------------------------------
-info "menu bar app"
-
-APP="$BGC_ROOT/build/black_glass_candle.app"
-if [ -d "$APP" ]; then
-  pass "app bundle built"
-else
-  note "app not built yet — run ./scripts/build.sh"
+if [ -d "$BACKUPS_DIR" ]; then
+  count="$(find "$BACKUPS_DIR" -name '*.tar.gz' 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$count" -gt 0 ]; then
+    pass "$count backup(s) in private/backups"
+  else
+    note "no backups yet — run ./scripts/backup.sh"
+  fi
 fi
 
-if security find-generic-password -s "black_glass_candle" -a "api-password" >/dev/null 2>&1; then
-  pass "API password present in Keychain"
+size="$(du -sk "$BGC_PRIVATE" 2>/dev/null | awk '{print $1 * 1024}')"
+if [ -n "$size" ]; then
+  pass "private/ is $(human_bytes "$size")"
+fi
+
+avail="$(df -k "$BGC_ROOT" | tail -1 | awk '{print $4 * 1024}')"
+if [ -n "$avail" ]; then
+  if [ "$avail" -lt 2147483648 ]; then
+    note "only $(human_bytes "$avail") free on this volume"
+  else
+    pass "$(human_bytes "$avail") free"
+  fi
+fi
+
+# The php formula is not pinned, so a brew upgrade can move PHP under the
+# services and they will fail to restart.
+if brew list --pinned 2>/dev/null | grep -qx php; then
+  pass "php formula is pinned"
 else
-  note "API password not in Keychain — run ./scripts/seed_menubar_config.sh"
+  note "php formula is not pinned — a 'brew upgrade' can break the services"
+  dim "to hold the current version:  brew pin php"
 fi
 
 # -----------------------------------------------------------------------------
@@ -221,8 +254,8 @@ fi
 printf '\n'
 if [ "$FAILS" -gt 0 ]; then
   printf '%s%d failure(s), %d warning(s)%s\n' "$C_RED" "$FAILS" "$WARNS" "$C_RESET"
-  printf 'See docs/operations.md §4 for the decision table.\n\n'
+  printf 'See docs/operations.md for the decision table.\n\n'
   exit 1
 fi
-printf '%sall checks passed (%d warning(s))%s\n\n' "$C_GREEN" "$WARNS" "$C_RESET"
+printf '%sno failures (%d warning(s))%s\n\n' "$C_GREEN" "$WARNS" "$C_RESET"
 exit 0

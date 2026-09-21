@@ -6,13 +6,13 @@
 #   ./scripts/install-youlag.sh --version v4.4.3
 #
 # Youlag turns YouTube feeds into a video-shaped layout instead of a list of
-# links. It also supplies a miniplayer, DeArrow-style thumbnails, and Shorts
-# blocking.
+# links, and adds a miniplayer, screen-capture thumbnails and Shorts blocking.
 #
-# Requirements: FreshRSS >= 1.30.0. Pinning an older tag breaks it silently.
+# Requirements: FreshRSS >= 1.30.0. An older pinned clone breaks it silently.
 #
-# The extension is downloaded, not vendored: it is GPL-3.0 third-party code and
-# has no business in this repository.
+# Downloaded, not vendored: it is GPL-3.0 third-party code and has no business in
+# this repository. It lands in private/apps/FreshRSS/extensions/, which is
+# gitignored along with the rest of private/.
 # =============================================================================
 
 set -euo pipefail
@@ -31,13 +31,16 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-EXT_DIR="$BGC_ROOT/freshrss-extensions"
+require_private_dir
+
+[ -d "$FRESHRSS_DIR" ] || die "FreshRSS is not installed. Run: ./scripts/install.sh"
+
+command -v curl    >/dev/null 2>&1 || die "curl not found"
+command -v python3 >/dev/null 2>&1 || die "python3 not found (parses the GitHub release JSON)"
+command -v unzip   >/dev/null 2>&1 || die "unzip not found"
+
+EXT_DIR="$FRESHRSS_DIR/extensions"
 DEST="$EXT_DIR/xExtension-Youlag"
-
-command -v curl >/dev/null 2>&1 || die "curl not found"
-command -v python3 >/dev/null 2>&1 || die "python3 not found (used to parse the GitHub release JSON)"
-command -v unzip >/dev/null 2>&1 || die "unzip not found"
-
 mkdir -p "$EXT_DIR"
 
 # -----------------------------------------------------------------------------
@@ -51,92 +54,82 @@ else
   API="https://api.github.com/repos/${REPO}/releases/latest"
 fi
 
-TMPDIR_LOCAL="$(mktemp -d)"
-cleanup() { rm -rf "$TMPDIR_LOCAL"; }
+TMP="$(mktemp -d)"
+cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
 
-HTTP="$(curl -s -o "$TMPDIR_LOCAL/release.json" -w '%{http_code}' --max-time 20 "$API" || printf '000')"
-if [ "$HTTP" != "200" ]; then
-  die "GitHub API returned HTTP $HTTP.
-       If this is a rate limit, wait an hour or set a token:
-         curl -H 'Authorization: Bearer \$GITHUB_TOKEN' ..."
-fi
+HTTP="$(curl -s -o "$TMP/release.json" -w '%{http_code}' --max-time 20 "$API" || printf '000')"
+[ "$HTTP" = "200" ] || die "GitHub API returned HTTP $HTTP
+       If this is a rate limit, wait an hour and retry."
 
-TAG="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag_name"])' "$TMPDIR_LOCAL/release.json")"
+TAG="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag_name"])' "$TMP/release.json")"
 ok "release $TAG"
 
-# Prefer a .zip asset; fall back to the source zipball (which also contains the
-# xExtension-Youlag directory).
-ASSET_URL="$(python3 - "$TMPDIR_LOCAL/release.json" <<'PY'
+# Prefer a .zip asset; fall back to the source zipball, which also contains the
+# xExtension-Youlag directory.
+ASSET_URL="$(python3 - "$TMP/release.json" <<'PY'
 import json, sys
 rel = json.load(open(sys.argv[1]))
 for a in rel.get("assets", []):
-    n = a.get("name", "").lower()
-    if n.endswith(".zip"):
+    if a.get("name", "").lower().endswith(".zip"):
         print(a["browser_download_url"]); sys.exit()
 print(rel.get("zipball_url", ""))
 PY
 )"
-
-[ -n "$ASSET_URL" ] || die "no downloadable asset found in release $TAG"
+[ -n "$ASSET_URL" ] || die "no downloadable asset in release $TAG"
 
 # -----------------------------------------------------------------------------
-# 2. Download
+# 2. Download and extract
 # -----------------------------------------------------------------------------
 info "downloading $(basename "$ASSET_URL")"
-curl -sL --max-time 120 -o "$TMPDIR_LOCAL/pkg.zip" "$ASSET_URL" \
-  || die "download failed"
-[ -s "$TMPDIR_LOCAL/pkg.zip" ] || die "downloaded file is empty"
-ok "$(human_bytes "$(wc -c < "$TMPDIR_LOCAL/pkg.zip" | tr -d ' ')")"
+curl -sL --max-time 120 -o "$TMP/pkg.zip" "$ASSET_URL" || die "download failed"
+[ -s "$TMP/pkg.zip" ] || die "downloaded file is empty"
+ok "$(human_bytes "$(wc -c < "$TMP/pkg.zip" | tr -d ' ')")"
 
-# -----------------------------------------------------------------------------
-# 3. Extract and locate xExtension-Youlag
-# -----------------------------------------------------------------------------
 info "extracting"
-mkdir -p "$TMPDIR_LOCAL/x"
-unzip -q -o "$TMPDIR_LOCAL/pkg.zip" -d "$TMPDIR_LOCAL/x" || die "unzip failed"
+mkdir -p "$TMP/x"
+unzip -q -o "$TMP/pkg.zip" -d "$TMP/x" || die "unzip failed"
 
-SRC="$(find "$TMPDIR_LOCAL/x" -type d -name 'xExtension-Youlag' -maxdepth 4 2>/dev/null | head -n 1 || true)"
+SRC="$(find "$TMP/x" -maxdepth 4 -type d -name 'xExtension-Youlag' 2>/dev/null | head -n 1 || true)"
 if [ -z "$SRC" ]; then
-  # Some archives nest the extension contents directly.
-  if [ -f "$TMPDIR_LOCAL/x/metadata.json" ] && [ -f "$TMPDIR_LOCAL/x/extension.php" ]; then
-    SRC="$TMPDIR_LOCAL/x"
+  # Some archives nest the extension contents directly rather than the folder.
+  if [ -f "$TMP/x/metadata.json" ] && [ -f "$TMP/x/extension.php" ]; then
+    SRC="$TMP/x"
   else
-    die "no xExtension-Youlag directory found in the archive.
-       Contents were:
-$(find "$TMPDIR_LOCAL/x" -maxdepth 2 | sed 's/^/         /')"
+    die "no xExtension-Youlag directory found. Archive contained:
+$(find "$TMP/x" -maxdepth 2 | sed 's/^/         /')"
   fi
 fi
 ok "found $(basename "$SRC")"
 
 # -----------------------------------------------------------------------------
-# 4. Install
+# 3. Install
 # -----------------------------------------------------------------------------
-if [ -d "$DEST" ]; then
-  OLD_VER="$(python3 -c 'import json,sys
+read_version() {
+  python3 -c 'import json,sys
 try: print(json.load(open(sys.argv[1]))["version"])
-except Exception: print("?")' "$DEST/metadata.json" 2>/dev/null || echo '?')"
-  info "replacing existing Youlag $OLD_VER"
+except Exception: print("?")' "$1" 2>/dev/null || echo '?'
+}
+
+if [ -d "$DEST" ]; then
+  info "replacing existing Youlag $(read_version "$DEST/metadata.json")"
   rm -rf "$DEST"
 fi
 
 cp -R "$SRC" "$DEST"
-ok "installed to freshrss-extensions/xExtension-Youlag"
-
-NEW_VER="$(python3 -c 'import json,sys
-try: print(json.load(open(sys.argv[1]))["version"])
-except Exception: print("?")' "$DEST/metadata.json" 2>/dev/null || echo '?')"
+chmod -R u+rwX,go-w "$DEST" 2>/dev/null || true
+ok "installed to private/apps/FreshRSS/extensions/xExtension-Youlag (v$(read_version "$DEST/metadata.json"))"
 
 # -----------------------------------------------------------------------------
-# 5. Confirm FreshRSS version satisfies the requirement
+# 4. Restart so FreshRSS picks it up
 # -----------------------------------------------------------------------------
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  if compose ps --status running --services 2>/dev/null | grep -q '^freshrss$'; then
-    info "restarting freshrss so the extension is picked up"
-    compose restart freshrss >/dev/null && ok "restarted"
-  else
-    warn "freshrss is not running — start it before enabling the extension"
-  fi
+# FreshRSS caches extension assets, so installing without a restart (and then a
+# hard browser reload) shows the old UI and looks like nothing happened.
+if [ "$(agent_state freshrss)" = "running" ]; then
+  info "restarting freshrss"
+  "$SELF_DIR/services.sh" restart freshrss >/dev/null 2>&1 && ok "restarted"
+else
+  warn "freshrss is not running — start it before enabling the extension"
 fi
 
 printf '\n'
@@ -144,12 +137,11 @@ ok "Youlag $TAG installed"
 printf '\n'
 printf '  %sNext:%s\n' "$C_BLUE" "$C_RESET"
 printf '    1. FreshRSS -> Settings -> Extensions\n'
-printf '    2. Enable  Youlag\n'
+printf '    2. Enable Youlag\n'
 printf '    3. Hard-reload the browser (Cmd+Shift+R)\n'
 printf '\n'
-dim "Step 3 matters: FreshRSS caches extension assets, so a normal reload shows"
-dim "the old UI and makes it look like the install did nothing."
+dim "Step 3 matters: the old UI will otherwise persist and make the install look"
+dim "like it failed."
 printf '\n'
-dim "Requires FreshRSS >= 1.30.0. If YouTube mode does nothing, check the version"
-dim "shown at the bottom of FreshRSS -> About."
+dim "Requires FreshRSS >= 1.30.0 — check the version at the bottom of the About page."
 printf '\n'

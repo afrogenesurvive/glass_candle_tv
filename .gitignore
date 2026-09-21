@@ -8,10 +8,44 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
+# 0. private/ — ALL personal state lives here, and ONLY here
+# -----------------------------------------------------------------------------
+# One rule covers everything: deployment config, the feed database, cloned
+# third-party apps, generated service configs, logs and backups.
+#
+# The repo folder contains nothing personal. If you can see it in a fresh
+# clone, it was safe to publish; everything else is under private/.
+#
+#     private/
+#     ├── env                  deployment config (passwords, tokens)
+#     ├── apps/FreshRSS/       cloned code
+#     │   └── data/            ← subscriptions, categories, feeds, read state
+#     ├── apps/rss-bridge/
+#     │   └── config/config.ini.php
+#     ├── etc/                 generated nginx + php-fpm config
+#     ├── run/                 unix sockets, pid files
+#     ├── logs/
+#     └── backups/
+#
+# CREATE IT FIRST. `git check-ignore` reports "not ignored" for a non-existent
+# path when the rule has a trailing slash, so a bare assertion here is a false
+# negative. Verified with the directory present.
+private/
+
+# Legacy Docker-era paths, kept so an old checkout cannot leak if it is ever
+# revived. Harmless if the directories do not exist.
+rss-bridge-config/
+freshrss-extensions/
+freshrss-data/
+
+# -----------------------------------------------------------------------------
 # 1. SECRETS — must never be committed
 # -----------------------------------------------------------------------------
 # The master env file: FreshRSS API password, Instagram burner sessionid,
 # GitHub PAT, Cloudflare tunnel token.
+#
+# NOTE: the live file now lives at private/env. This stays because a stale
+# .env at the root would otherwise be committed silently.
 .env
 .env.*
 *.env

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# upgrade.sh — update the container images safely
+# upgrade.sh — update FreshRSS and RSS-Bridge
 #
-#   ./scripts/upgrade.sh              # backup, pull, recreate, verify
-#   ./scripts/upgrade.sh --dry-run    # show what would change, change nothing
+#   ./scripts/upgrade.sh              # backup, pull, restart, verify
+#   ./scripts/upgrade.sh --dry-run    # show what would change
 #   ./scripts/upgrade.sh --no-backup  # skip the automatic pre-upgrade backup
 #
-# Always backs up first unless told otherwise. Youlag requires FreshRSS >= 1.30.0;
-# pinning an older tag silently breaks YouTube mode.
+# Natively, upgrading means `git pull` in the two clones rather than pulling
+# container images. Your data is in a different directory from the code, so it is
+# untouched by an upgrade — that separation is the main reason this layout
+# survived the move away from Docker.
 # =============================================================================
 
 set -euo pipefail
@@ -27,104 +29,128 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-require_env_file
-require_docker
+require_private_dir
+require_php
 
 # -----------------------------------------------------------------------------
-# 1. Record the current state so a rollback is possible
+# Report what is currently checked out
 # -----------------------------------------------------------------------------
-info "current image state"
+info "current versions"
 
-CURRENT=""
-for svc in freshrss rss-bridge; do
-  img="$(compose images "$svc" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | head -n 1 || true)"
-  digest="$(compose images "$svc" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)"
-  if [ -n "$img" ]; then
-    printf '  %-12s %s  (%s)\n' "$svc" "$img" "${digest:0:12}"
-    CURRENT="${CURRENT}${svc}=${img}@${digest:0:12}
-"
+for pair in "FreshRSS:$FRESHRSS_DIR" "RSS-Bridge:$RSSBRIDGE_DIR"; do
+  name="${pair%%:*}"; dir="${pair#*:}"
+  if [ -d "$dir/.git" ]; then
+    branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+    commit="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    subject="$(git -C "$dir" log -1 --format=%s 2>/dev/null | cut -c1-60 || echo '')"
+    printf '  %-11s %s @ %s  %s\n' "$name" "$branch" "$commit" "$subject"
   else
-    printf '  %-12s %s\n' "$svc" "(not present)"
+    printf '  %-11s %s(not cloned)%s\n' "$name" "$C_DIM" "$C_RESET"
   fi
 done
 
+# FreshRSS reports its own version; useful because a failed pull can leave the
+# code at a version that does not match what the UI advertises.
+if [ -f "$FRESHRSS_DIR/constants.php" ]; then
+  ver="$(sed -n 's/.*FRESHRSS_VERSION.\{0,4\}\([0-9][^;'"'"']*\).*/\1/p' "$FRESHRSS_DIR/constants.php" 2>/dev/null | head -1 || true)"
+  [ -n "$ver" ] && printf '  %-11s %s\n' "app version" "$ver"
+fi
+
 printf '\n'
-printf '%s  Rollback note%s: write these down. Docker does not track them for you.\n' \
-  "$C_YELLOW" "$C_RESET"
+printf '%s  Rollback note%s: note the commit hashes above. Docker used to record\n' "$C_YELLOW" "$C_RESET"
+printf '  image digests for you; git has nothing equivalent unless you write it down.\n'
 
 # -----------------------------------------------------------------------------
-# 2. Pull
+# Fetch and preview
 # -----------------------------------------------------------------------------
-info "pulling latest images"
+info "fetching"
+
+for dir in "$FRESHRSS_DIR" "$RSSBRIDGE_DIR"; do
+  [ -d "$dir/.git" ] || continue
+  git -C "$dir" fetch --quiet --depth 1 origin 2>/dev/null || warn "$(basename "$dir"): fetch failed"
+done
+ok "fetched"
+
+# A shallow clone is used at install time, so `git log` cannot show a full diff.
+# Report the incoming commit rather than pretending to summarise it.
+for pair in "FreshRSS:$FRESHRSS_DIR" "RSS-Bridge:$RSSBRIDGE_DIR"; do
+  name="${pair%%:*}"; dir="${pair#*:}"
+  [ -d "$dir/.git" ] || continue
+  head_local="$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo '')"
+  head_remote="$(git -C "$dir" rev-parse '@{u}' 2>/dev/null || echo '')"
+  if [ -n "$head_local" ] && [ "$head_local" != "$head_remote" ]; then
+    printf '  %-11s %sbehind%s  %s -> %s\n' "$name" "$C_YELLOW" "$C_RESET" \
+      "${head_local:0:8}" "${head_remote:0:8}"
+  else
+    printf '  %-11s %sup to date%s\n' "$name" "$C_GREEN" "$C_RESET"
+  fi
+done
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  dim "dry run — would run: docker compose pull"
-  compose config --images 2>/dev/null | sed 's/^/     /' || true
   printf '\n'
   info "dry run complete — nothing changed"
   exit 0
 fi
 
-compose pull
-
 # -----------------------------------------------------------------------------
-# 3. Backup first
+# Backup
 # -----------------------------------------------------------------------------
 if [ "$DO_BACKUP" -eq 1 ]; then
-  if compose ps --status running --services 2>/dev/null | grep -q '^freshrss$'; then
+  if [ -d "$FRESHRSS_DIR/data/users" ]; then
     info "pre-upgrade backup"
     "$SELF_DIR/backup.sh" || die "backup failed — aborting the upgrade (nothing changed)"
   else
-    warn "freshrss not running; skipping the pre-upgrade backup"
-    warn "if this is a deliberate restore-in-progress, that is fine"
+    warn "no FreshRSS user data yet; skipping the backup"
   fi
 fi
 
 # -----------------------------------------------------------------------------
-# 4. Recreate
+# Pull
 # -----------------------------------------------------------------------------
-info "recreating containers"
-compose up -d --remove-orphans
-ok "recreated"
+info "updating"
+
+for dir in "$FRESHRSS_DIR" "$RSSBRIDGE_DIR"; do
+  [ -d "$dir/.git" ] || continue
+  # --ff-only: a merge commit here would mean the clone has local edits, which
+  # this script never makes. Failing loudly is better than creating a conflict.
+  if git -C "$dir" pull --ff-only --quiet 2>/dev/null; then
+    ok "$(basename "$dir") updated to $(git -C "$dir" rev-parse --short HEAD)"
+  else
+    warn "$(basename "$dir") could not fast-forward"
+    dim "local changes? inspect:  git -C $dir status"
+  fi
+done
+
+# FreshRSS may ship new extension hooks or schema migrations; restarting is what
+# applies them.
+info "restarting services"
+"$SELF_DIR/services.sh" restart >/dev/null 2>&1 || true
+ok "restarted"
 
 # -----------------------------------------------------------------------------
-# 5. Verify
+# Verify
 # -----------------------------------------------------------------------------
 printf '\n'
-dim "waiting for health (up to 120s)"
-HEALTHY=0
-for _ in $(seq 1 40); do
-  if compose ps --format '{{.Service}} {{.Status}}' 2>/dev/null | grep -q '^freshrss .*(healthy)'; then
-    HEALTHY=1
-    break
-  fi
-  sleep 3
+dim "waiting for FreshRSS (up to 60s)"
+healthy=0
+for _ in $(seq 1 30); do
+  code="$(http_code "http://127.0.0.1:$(freshrss_port)/" 5)"
+  if [ "$code" = "200" ] || [ "$code" = "302" ]; then healthy=1; break; fi
+  sleep 2
 done
 
 printf '\n'
-if [ "$HEALTHY" -eq 1 ]; then
-  ok "freshrss healthy after upgrade"
+if [ "$healthy" -eq 1 ]; then
+  ok "FreshRSS answering after upgrade"
 else
-  warn "freshrss did not report healthy within 120s — inspect before trusting it"
-  dim "docker compose logs --tail 50 freshrss"
+  warn "FreshRSS did not answer within 60s"
+  dim "logs: private/logs/freshrss-stderr.log"
 fi
-
-FR_VERSION="$(compose exec -T freshrss sh -c 'sed -n "s/.*FRESHRSS_VERSION.\{0,4\}\([0-9][^;\x27]*\).*/\1/p" /var/www/FreshRSS/constants.php 2>/dev/null | head -n 1' 2>/dev/null || true)"
-
-printf '\n'
-printf '  %snew image state%s\n' "$C_BLUE" "$C_RESET"
-for svc in freshrss rss-bridge; do
-  img="$(compose images "$svc" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | head -n 1 || true)"
-  digest="$(compose images "$svc" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)"
-  printf '  %-12s %s  (%s)\n' "$svc" "${img:-(not present)}" "${digest:0:12}"
-done
-[ -n "$FR_VERSION" ] && printf '  %-12s %s\n' "freshRSS" "$FR_VERSION"
-printf '\n'
 
 info "running healthcheck"
-"$SELF_DIR/healthcheck.sh" || warn "healthcheck reported problems — see docs/operations.md §4"
+"$SELF_DIR/healthcheck.sh" || warn "healthcheck reported problems — see docs/operations.md"
 
 printf '\n'
-dim "If something broke, roll back by pinning the previous tag in docker-compose.yml"
-dim "and running: docker compose up -d --remove-orphans"
+dim "FreshRSS may require a schema migration on first request after an upgrade;"
+dim "if the UI reports one, follow it in the browser."
 printf '\n'

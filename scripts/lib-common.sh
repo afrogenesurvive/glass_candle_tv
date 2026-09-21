@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# lib-common.sh — shared helpers for black_glass_candle ops scripts
+# lib-common.sh — shared helpers for glass_candle_tv ops scripts
 #
 # Sourced, never executed. Targets bash 3.2 (the version macOS ships), so:
 #   - no associative arrays, no ${var,,}, no mapfile
@@ -9,9 +9,26 @@
 set -euo pipefail
 
 BGC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="$BGC_ROOT/.env"
+
+# Everything personal lives under private/ — config, the feed database, cloned
+# apps, generated service configs, logs and backups. One gitignore rule covers
+# the whole subtree, so "is this safe to publish" is answered by one question:
+# is it under private/ or not.
+BGC_PRIVATE="$BGC_ROOT/private"
+ENV_FILE="$BGC_PRIVATE/env"
 ENV_EXAMPLE="$BGC_ROOT/.env.example"
-COMPOSE_FILE="$BGC_ROOT/docker-compose.yml"
+APPS_DIR="$BGC_PRIVATE/apps"
+ETC_DIR="$BGC_PRIVATE/etc"
+RUN_DIR="$BGC_PRIVATE/run"
+LOGS_DIR="$BGC_PRIVATE/logs"
+BACKUPS_DIR="$BGC_PRIVATE/backups"
+
+FRESHRSS_DIR="$APPS_DIR/FreshRSS"
+RSSBRIDGE_DIR="$APPS_DIR/rss-bridge"
+
+# launchd labels. Must match scripts/install.sh and scripts/services.sh.
+LAUNCHD_PREFIX="com.afrogenesurvive.glass-candle-tv"
+LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 
 if [ -t 1 ]; then
   C_RESET=$'\033[0m'; C_RED=$'\033[31m'; C_GREEN=$'\033[32m'
@@ -27,14 +44,14 @@ dim()  { printf '%s     %s%s\n' "$C_DIM" "$*" "$C_RESET"; }
 die()  { printf '%s error:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
 # -----------------------------------------------------------------------------
-# Reading .env
+# Reading private/env
 # -----------------------------------------------------------------------------
-# Deliberately NOT `source .env`: a value containing a backtick, $(), or an
-# unbalanced quote would execute. These helpers parse the file as data.
+# Deliberately NOT `source`-ing the file: a value containing a backtick, $(), or
+# an unbalanced quote would execute. These helpers parse it as data.
 #
 # Known limitation: a `#` inside an unquoted value is treated as a comment
-# marker when preceded by whitespace. That is the standard .env convention and
-# matches what docker compose does.
+# marker when preceded by whitespace. That is the standard convention for this
+# file format.
 # -----------------------------------------------------------------------------
 
 get_env() {
@@ -74,7 +91,13 @@ get_env() {
 }
 
 require_env_file() {
-  [ -f "$ENV_FILE" ] || die ".env not found.  Fix: cp .env.example .env  (then fill it in)"
+  [ -f "$ENV_FILE" ] || die "no config at private/env
+       Create it:  cp .env.example private/env   (then fill it in)
+       Or let the installer do it:  ./scripts/install.sh"
+}
+
+require_private_dir() {
+  [ -d "$BGC_PRIVATE" ] || die "private/ is missing.  Run: ./scripts/install.sh"
 }
 
 # require_vars VAR [VAR...] — fail listing every missing var, not just the first.
@@ -87,33 +110,96 @@ require_vars() {
     fi
   done
   if [ -n "$missing" ]; then
-    die "these required variables are empty in .env: ${missing}
+    die "these required values are empty in private/env: ${missing}
        See docs/inputs_required.md for how to obtain each one."
   fi
 }
 
 # -----------------------------------------------------------------------------
-# Docker
+# Toolchain
 # -----------------------------------------------------------------------------
-require_docker() {
-  command -v docker >/dev/null 2>&1 \
-    || die "docker not found on PATH.
-       Install Docker Desktop, OrbStack, or colima, then re-run.
-       See README.md > Prerequisites."
-  docker compose version >/dev/null 2>&1 \
-    || die "docker is present but 'docker compose' (v2) is not.
-       The v1 'docker-compose' command is not supported by these scripts."
-  docker info >/dev/null 2>&1 \
-    || die "the Docker daemon is not running. Start Docker Desktop and retry."
+require_brew() {
+  command -v brew >/dev/null 2>&1 || die "Homebrew not found.
+       Install it from https://brew.sh and re-run."
 }
 
-compose() {
-  docker compose -f "$COMPOSE_FILE" "$@"
+require_php() {
+  command -v php >/dev/null 2>&1 || die "php not found on PATH.
+       Install it:  brew install php"
 }
 
-# Is the freshrss container up?
-freshrss_running() {
-  [ "$(compose ps --status running --services 2>/dev/null | grep -c '^freshrss$' || true)" -gt 0 ]
+PHP_BIN="$(command -v php 2>/dev/null || true)"
+PHP_VER=""
+if [ -n "$PHP_BIN" ]; then
+  PHP_VER="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
+fi
+
+# How many worker processes the built-in PHP server forks.
+# The default is 1, which means a single slow request (a feed refresh triggered
+# from the UI) blocks the whole interface. Four is ample for one person and still
+# trivially light on a laptop.
+php_cli_workers() { get_env PHP_CLI_SERVER_WORKERS 4; }
+
+# -----------------------------------------------------------------------------
+# launchd — user-level agents, so nothing here needs sudo
+# -----------------------------------------------------------------------------
+plist_path() { printf '%s/%s.%s.plist' "$LAUNCH_AGENTS_DIR" "$LAUNCHD_PREFIX" "$1"; }
+label_for()  { printf '%s.%s' "$LAUNCHD_PREFIX" "$1"; }
+
+agent_loaded() {
+  launchctl print "gui/$(id -u)/$(label_for "$1")" >/dev/null 2>&1
+}
+
+agent_state() {
+  # running | loaded | not-loaded
+  local label; label="$(label_for "$1")"
+  if ! launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+    printf 'not-loaded'; return
+  fi
+  if launchctl print "gui/$(id -u)/$label" 2>/dev/null | grep -qE 'state = running'; then
+    printf 'running'
+  else
+    printf 'loaded'
+  fi
+}
+
+bootout_agent() {
+  local label; label="$(label_for "$1")"
+  if agent_loaded "$1"; then
+    launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+  fi
+}
+
+bootstrap_agent() {
+  local name="$1" plist; plist="$(plist_path "$name")"
+  [ -f "$plist" ] || die "missing launch agent plist: $plist"
+  bootout_agent "$name"
+  launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
+    || die "could not load launch agent '$name'
+       Try manually:  launchctl bootstrap gui/$(id -u) '$plist'"
+  launchctl enable "gui/$(id -u)/$(label_for "$name")" >/dev/null 2>&1 || true
+}
+
+# -----------------------------------------------------------------------------
+# HTTP / ports
+# -----------------------------------------------------------------------------
+# Returns the HTTP status code, or '000' if the request could not be made.
+#
+# NOTE: on failure curl BOTH prints `000` (the %{http_code} placeholder) AND
+# exits non-zero. Writing `... || printf '000'` therefore appends a second one
+# and yields `000000`, which then fails every `= "000"` comparison downstream
+# and makes a working service look dead. Capture, then normalise.
+http_code() {
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time "${2:-5}" "$1" 2>/dev/null)" || true
+  [ -n "$code" ] || code="000"
+  printf '%s' "$code"
+}
+
+port_listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
+
+port_holder() {
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | tail -n +2 | awk '{print $1" (pid "$2")"}' | head -1
 }
 
 # -----------------------------------------------------------------------------
@@ -148,4 +234,13 @@ human_bytes() {
     while (b >= 1024 && i < 5) { b /= 1024; i++ }
     printf "%.1f %s", b, u[i]
   }'
+}
+
+freshrss_port()  { get_env FRESHRSS_PORT 8080; }
+rssbridge_port() { get_env RSSBRIDGE_PORT 3000; }
+
+# The API base the menu bar app expects. Kept in one place so the app's config
+# and the server's URL can never drift apart.
+freshrss_api_url() {
+  printf 'http://127.0.0.1:%s/api/greader.php' "$(freshrss_port)"
 }
