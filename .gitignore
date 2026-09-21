@@ -1,0 +1,82 @@
+# =============================================================================
+# black_glass_candle — ignore rules
+#
+# Order matters: secret rules first, then build noise, then local state.
+# Verify any new rule against a REAL file with:
+#     git check-ignore -v --no-index <path>
+# (plain `git check-ignore` skips already-tracked paths and will report nothing)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. SECRETS — must never be committed
+# -----------------------------------------------------------------------------
+# The master env file: FreshRSS API password, Instagram burner sessionid,
+# GitHub PAT, Cloudflare tunnel token.
+.env
+.env.*
+*.env
+!.env.example
+
+# Generic secret containers, in case values get exported during debugging.
+secrets/
+.secrets/
+*.pem
+*.key
+*.p12
+*.kdbx
+
+# RSS-Bridge holds its instance token + bridge credentials in here.
+# The .example template IS committed; the live file is not.
+rss-bridge-config/config.ini.php
+**/config.ini.php
+!**/config.ini.php.example
+
+# FreshRSS may be bind-mounted for debugging; it holds config.php + the SQLite DB
+# (which contains the user table and API password hash).
+freshrss-data/
+**/config.php
+**/config-user.custom.php
+**/users/*/config.php
+
+# -----------------------------------------------------------------------------
+# 2. Backups — a dump contains the whole feed DB and every subscription
+# -----------------------------------------------------------------------------
+backups/
+*.opml.bak
+*.sqlite.bak
+*.tar.gz
+!docs/**/*.tar.gz
+
+# -----------------------------------------------------------------------------
+# 3. Vendored third-party (re-installed by scripts/install-youlag.sh)
+# -----------------------------------------------------------------------------
+freshrss-extensions/*
+!freshrss-extensions/.gitkeep
+!freshrss-extensions/README.md
+
+# -----------------------------------------------------------------------------
+# 4. Swift build products (menubar app)
+# -----------------------------------------------------------------------------
+.build/
+build/
+*.app/
+.swiftpm/
+*.xcuserstate
+xcuserdata/
+
+# -----------------------------------------------------------------------------
+# 5. Docker / runtime state
+# -----------------------------------------------------------------------------
+docker-compose.override.yml
+*.log
+logs/
+.pids/
+
+# -----------------------------------------------------------------------------
+# 6. macOS
+# -----------------------------------------------------------------------------
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Icon?
