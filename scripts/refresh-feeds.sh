@@ -23,11 +23,6 @@ QUIET=0
 
 say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
 
-if [ ! -d "$FRESHRSS_DIR" ]; then
-  say "FreshRSS is not installed at $FRESHRSS_DIR — nothing to refresh."
-  exit 0
-fi
-
 mkdir -p "$LOGS_DIR"
 LOG="$LOGS_DIR/refresh.log"
 
@@ -39,6 +34,16 @@ if [ -f "$LOG" ]; then
     tail -n 500 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
     printf '%s\n' "--- log trimmed at $(date '+%Y-%m-%d %H:%M:%S') ---" >> "$LOG"
   fi
+fi
+
+# Record the skip explicitly. Exiting 0 without writing anything makes "nothing
+# to do" and "never ran" indistinguishable from the outside, which is the exact
+# failure this log exists to prevent.
+if [ ! -d "$FRESHRSS_DIR" ]; then
+  printf '%s skipped: FreshRSS is not installed at %s\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S')" "$FRESHRSS_DIR" >> "$LOG"
+  say "FreshRSS is not installed at $FRESHRSS_DIR — nothing to refresh."
+  exit 0
 fi
 
 FRESHRSS_USER="$(get_env ADMIN_USER admin)"
@@ -83,12 +88,31 @@ else
   OUTPUT="$("$PHP" "$FRESHRSS_DIR/app/actualize_script.php" 2>&1)" || STATUS=$?
 fi
 
+# actualize-user.php ends with `done($nbUpdatedFeeds > 0)` — it exits 1 when it
+# updated ZERO feeds, which is not a failure at all: it is what an ordinary quiet
+# half-hour looks like. Taken at face value, most runs would log FAILED and every
+# calm period would read as a broken job.
+#
+# The two cases are distinguishable from the output: a real error aborts before
+# FreshRSS prints its "actualized N feeds" summary, and says "FreshRSS error".
+NOTHING_NEW=0
+if [ "$STATUS" -ne 0 ] && [ "$ENTRY" = "cli" ] \
+   && printf '%s' "$OUTPUT" | grep -q 'FreshRSS actualized' \
+   && ! printf '%s' "$OUTPUT" | grep -q 'FreshRSS error'; then
+  NOTHING_NEW=1
+  STATUS=0
+fi
+
 # The job runs from launchd, so this log is the only record of what happened.
 {
   printf '=== %s  (entry: %s, user: %s) ===\n' "$STARTED" "$ENTRY" "$FRESHRSS_USER"
   [ -n "$OUTPUT" ] && printf '%s\n' "$OUTPUT"
   if [ "$STATUS" -eq 0 ]; then
-    printf 'exit 0 — ok\n'
+    if [ "$NOTHING_NEW" -eq 1 ]; then
+      printf 'exit 0 — ok (no feeds had anything new)\n'
+    else
+      printf 'exit 0 — ok\n'
+    fi
   else
     printf 'exit %s — FAILED\n' "$STATUS"
   fi

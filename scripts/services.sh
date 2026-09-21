@@ -140,6 +140,33 @@ XML
 }
 
 # -----------------------------------------------------------------------------
+# Agent scripts — staged OUT of the repository
+# -----------------------------------------------------------------------------
+# A launchd job cannot read a repository kept under ~/Documents, ~/Desktop or
+# ~/Downloads: the read fails with "Operation not permitted" and the agent
+# records exit 126, which is indistinguishable from a job that currently has
+# nothing to do (the measurement is in lib-common.sh). The repo keeps the real,
+# edited scripts; launchd runs copies from AGENT_DIR, which sits beside the data.
+#
+# Consequence worth knowing: editing refresh-feeds.sh in the repo does NOT change
+# what the schedule runs. Re-running `install` is what deploys it — which is why
+# healthcheck.sh reports a stale copy rather than trusting anyone to remember.
+stage_agent_files() {
+  local f
+  mkdir -p "$AGENT_DIR" || die "could not create $AGENT_DIR"
+  for f in $AGENT_FILES; do
+    [ -f "$SELF_DIR/$f" ] || die "missing $SELF_DIR/$f"
+    if [ -f "$AGENT_DIR/$f" ] && cmp -s "$SELF_DIR/$f" "$AGENT_DIR/$f"; then
+      dim "$f unchanged"
+    else
+      cp -f "$SELF_DIR/$f" "$AGENT_DIR/$f" || die "could not stage $f"
+      ok "staged $f"
+    fi
+  done
+  chmod 700 "$AGENT_DIR" 2>/dev/null || true
+}
+
+# -----------------------------------------------------------------------------
 # refresh (the native replacement for Docker's CRON_MIN)
 # -----------------------------------------------------------------------------
 # The Docker image ran a cron daemon driven by CRON_MIN="13,43" — "at minute 13
@@ -173,7 +200,7 @@ plist_refresh() {
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>$SELF_DIR/refresh-feeds.sh</string>
+		<string>$AGENT_DIR/refresh-feeds.sh</string>
 		<string>--quiet</string>
 	</array>
 	<key>RunAtLoad</key>
@@ -225,6 +252,7 @@ do_install() {
        Run: ./scripts/gen-configs.sh"
 
   info "installing launch agents"
+  stage_agent_files
 
   write_plist freshrss  "$(plist_php_server freshrss  "$(freshrss_port)"  "$FRESHRSS_DIR/p")"
   write_plist rssbridge "$(plist_php_server rssbridge "$(rssbridge_port)" "$RSSBRIDGE_DIR" "$ETC_DIR/rss-bridge-router.php")"
@@ -236,6 +264,9 @@ do_install() {
     ok "$svc loaded"
   done
 
+  printf '\n'
+  dim "launchd executes its scripts from $AGENT_DIR"
+  dim "after editing anything in scripts/, re-run this command to deploy it"
   printf '\n'
   do_status
 }
@@ -254,7 +285,8 @@ do_uninstall() {
     fi
   done
   printf '\n'
-  dim "Nothing under private/ was deleted — your data is untouched."
+  dim "Nothing in the data directory was deleted — your data is untouched:"
+  dim "  $BGC_PRIVATE"
   printf '\n'
 }
 
@@ -290,7 +322,17 @@ do_stop() {
 }
 
 do_restart() {
-  local svc
+  local svc p
+  # TZ, CRON_MIN, the ports and PHP_CLI_SERVER_WORKERS are baked into the plist
+  # XML when it is generated, so a restart re-reads the FILE, not private/env.
+  # Changing any of them needs `install`. Say so rather than silently keeping
+  # the old values while reporting success.
+  p="$(plist_path freshrss)"
+  if [ -f "$p" ] && [ -f "$ENV_FILE" ] && [ "$p" -ot "$ENV_FILE" ]; then
+    warn "private/env is newer than the launch agent plists"
+    dim "  TZ, CRON_MIN, ports and worker counts are baked in at install time,"
+    dim "  so a restart will not pick them up. Use: ./scripts/services.sh install"
+  fi
   for svc in $(services_for "$TARGET"); do
     bootout_agent "$svc"
     if [ -f "$(plist_path "$svc")" ]; then
@@ -328,6 +370,10 @@ do_status() {
   code="$(http_code "http://127.0.0.1:$rb_port/")"
   if [ "$code" = "200" ] || [ "$code" = "302" ]; then
     ok "RSS-Bridge answering on :$rb_port (HTTP $code)"
+  elif [ "$code" = "401" ]; then
+    # Expected, not a fault: the root page needs the token, so a probe without
+    # one is rejected. healthcheck.sh asks the same question with a valid token.
+    ok "RSS-Bridge answering on :$rb_port (HTTP 401 — token auth enforced)"
   elif [ "$code" = "000" ]; then
     warn "RSS-Bridge not answering on :$rb_port"
   else
@@ -335,7 +381,8 @@ do_status() {
   fi
 
   printf '\n'
-  dim "Logs: private/logs/"
+  dim "Data: $BGC_PRIVATE"
+  dim "Logs: $LOGS_DIR"
   printf '\n'
 }
 

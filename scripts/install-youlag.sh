@@ -118,7 +118,8 @@ fi
 
 cp -R "$SRC" "$DEST"
 chmod -R u+rwX,go-w "$DEST" 2>/dev/null || true
-ok "installed to private/apps/FreshRSS/extensions/xExtension-Youlag (v$(read_version "$DEST/metadata.json"))"
+ok "Youlag installed (v$(read_version "$DEST/metadata.json"))"
+dim "$DEST"
 
 # -----------------------------------------------------------------------------
 # 4. Restart so FreshRSS picks it up

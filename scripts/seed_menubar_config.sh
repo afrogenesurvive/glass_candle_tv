@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# seed_menubar_config.sh — push .env values into the menu bar app
+# seed_menubar_config.sh — push private/env values into the menu bar app
 #
 #   ./scripts/seed_menubar_config.sh
 #   ./scripts/seed_menubar_config.sh --show      # show what is currently stored
 #   ./scripts/seed_menubar_config.sh --clear     # remove stored credentials
 #
-# The Swift app never reads .env. It reads the Keychain (for the API password)
-# and UserDefaults (for everything else). This script is the bridge between the
-# two, so there is exactly one place to change the URL or rotate the password.
+# The Swift app never reads private/env. It reads the Keychain (for the API
+# password) and UserDefaults (for everything else). This script is the bridge
+# between the two, so there is exactly one place to change the URL or rotate
+# the password.
 #
 # Run this again after rotating ADMIN_API_PASSWORD.
 # =============================================================================
@@ -43,7 +44,7 @@ if [ "$MODE" = "show" ]; then
   info "stored configuration"
 
   printf '\n  %sUserDefaults%s (domain: %s)\n' "$C_BLUE" "$C_RESET" "$BUNDLE_ID"
-  for key in apiBaseURL apiUser refreshSeconds menuBarTextMode showFlameIndicator useEmbeddedWebView; do
+  for key in apiBaseURL apiUser refreshSeconds menuBarTextMode showFlameIndicator useEmbeddedWebView rssBridgeURL showIcon launchAtLogin; do
     val="$(defaults read "$BUNDLE_ID" "$key" 2>/dev/null || echo "(unset)")"
     printf '    %-20s %s\n' "$key" "$val"
   done
@@ -67,7 +68,7 @@ if [ "$MODE" = "clear" ]; then
   info "clearing stored configuration"
   security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" >/dev/null 2>&1 \
     && ok "removed Keychain item" || dim "no Keychain item to remove"
-  for key in apiBaseURL apiUser refreshSeconds menuBarTextMode showFlameIndicator useEmbeddedWebView; do
+  for key in apiBaseURL apiUser refreshSeconds menuBarTextMode showFlameIndicator useEmbeddedWebView rssBridgeURL showIcon launchAtLogin; do
     defaults delete "$BUNDLE_ID" "$key" >/dev/null 2>&1 || true
   done
   ok "removed UserDefaults keys"
@@ -83,16 +84,29 @@ fi
 require_env_file
 
 API_URL="$(get_env MENUBAR_API_BASE_URL)"
+# Derive the address from the port the service actually listens on. The env
+# template hardcodes 8080, so without this a changed FRESHRSS_PORT leaves the
+# app pointing at a dead address with no indication why.
+DERIVED_URL="$(freshrss_api_url)"
+if [ -z "$API_URL" ]; then
+  API_URL="$DERIVED_URL"
+elif [ "$API_URL" != "$DERIVED_URL" ]; then
+  warn "MENUBAR_API_BASE_URL does not match the configured port"
+  dim "  configured: $API_URL"
+  dim "  derived:    $DERIVED_URL"
+  dim "  using the configured value; blank it to derive automatically"
+fi
+RSSBRIDGE_URL="http://127.0.0.1:$(rssbridge_port)"
 API_USER="$(get_env MENUBAR_API_USER "$(get_env ADMIN_USER admin)")"
 API_PASS="$(get_env MENUBAR_API_PASSWORD)"
 [ -n "$API_PASS" ] || API_PASS="$(get_env ADMIN_API_PASSWORD)"
 REFRESH="$(get_env MENUBAR_REFRESH_SECONDS 300)"
 
-[ -n "$API_URL" ]  || die "MENUBAR_API_BASE_URL is empty in .env"
-[ -n "$API_USER" ] || die "MENUBAR_API_USER is empty in .env"
+[ -n "$API_URL" ]  || die "MENUBAR_API_BASE_URL is empty in private/env"
+[ -n "$API_USER" ] || die "MENUBAR_API_USER is empty in private/env"
 if [ -z "$API_PASS" ]; then
   die "no API password found.
-       Set MENUBAR_API_PASSWORD (or ADMIN_API_PASSWORD) in .env.
+       Set MENUBAR_API_PASSWORD (or ADMIN_API_PASSWORD) in private/env.
        Both are blank in .env.example — see docs/inputs_required.md §B2."
 fi
 
@@ -108,6 +122,7 @@ info "seeding menu bar configuration"
 defaults write "$BUNDLE_ID" apiBaseURL          -string "$API_URL"
 defaults write "$BUNDLE_ID" apiUser             -string "$API_USER"
 defaults write "$BUNDLE_ID" refreshSeconds      -int    "$REFRESH"
+defaults write "$BUNDLE_ID" rssBridgeURL        -string "$RSSBRIDGE_URL"
 defaults write "$BUNDLE_ID" menuBarTextMode     -string "unread"
 defaults write "$BUNDLE_ID" showFlameIndicator  -bool   true
 defaults write "$BUNDLE_ID" useEmbeddedWebView  -bool   false

@@ -8,6 +8,40 @@ entries are public and deliberately exclude credential, path and release mechani
 
 ---
 
+## [0.0.1-2] — 2026-09-21
+
+Personal state moved out of the checkout, so the repository can live anywhere — and the
+scheduled refresh finally works from a machine that protects `~/Documents`.
+
+### Changed
+
+- **The data directory is no longer inside the repository.** It lives in
+  `~/Library/Application Support/glass_candle_tv/private`. The checkout now contains
+  nothing personal at all, and `private/` stays gitignored as a backstop so a stray copy
+  can never be committed.
+- **The refresh job runs a staged copy of its script.** macOS denies a background job
+  access to `~/Documents`, `~/Desktop` and `~/Downloads`; the read fails and the job exits
+  126, which looks exactly like "nothing new today". `./scripts/services.sh install`
+  deploys the two files the job needs beside the data, and the healthcheck reports a stale
+  copy rather than letting the schedule quietly run old code.
+- **A refresh that finds nothing new is no longer logged as a failure.** FreshRSS's CLI
+  exits non-zero when it updates zero feeds — its success test is "did anything change",
+  not "did anything go wrong" — so a quiet run now records `exit 0 — ok`.
+- **The service status check no longer warns about RSS-Bridge's `401`.** The root page
+  requires the token, so an unauthenticated probe is supposed to be rejected.
+
+### Why
+
+The previous layout kept everything in one folder, which is easier to reason about but
+collides with macOS privacy protection: with the checkout under `~/Documents`, the
+refresh job could not read its own script. Moving the whole project out of `~/Documents`
+fixed it at the cost of putting the code somewhere you did not want it. Splitting the data
+out satisfies the same constraint while leaving the checkout wherever you prefer — and it
+is what the split should have been from the start, since only what a background job must
+*read* is affected.
+
+---
+
 ## [0.0.1-1] — 2026-09-21
 
 Runs natively on PHP. The container stack is gone, and everything personal now lives in a

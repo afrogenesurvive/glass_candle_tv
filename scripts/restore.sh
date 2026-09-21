@@ -4,6 +4,7 @@
 #
 #   ./scripts/restore.sh                    # list backups and pick one
 #   ./scripts/restore.sh <archive.tar.gz>   # restore a snapshot
+#   ./scripts/restore.sh latest             # restore the most recent snapshot
 #   ./scripts/restore.sh <archive.tar.gz> --yes
 #
 # DESTRUCTIVE: the existing FreshRSS data directory is moved aside, not deleted,
@@ -32,15 +33,29 @@ done
 
 require_private_dir
 
+# `latest` is the form docs/operations.md and backup.sh's closing hint both
+# print. It used to be treated as a filename and die with a confusing error, so
+# following the runbook literally did not work.
+case "$TARGET" in
+  latest|'<latest>')
+    ARCHIVE_DIR="$(backups_dir)"
+    TARGET="$(ls -t "$ARCHIVE_DIR"/*.tar.gz 2>/dev/null | head -n 1 || true)"
+    [ -n "$TARGET" ] || die "no backups in $ARCHIVE_DIR — run ./scripts/backup.sh first"
+    info "using the most recent backup"
+    dim "  $(basename "$TARGET")"
+    ;;
+esac
+
 # -----------------------------------------------------------------------------
 # Pick a source
 # -----------------------------------------------------------------------------
 if [ -z "$TARGET" ]; then
-  [ -d "$BACKUPS_DIR" ] || die "no backups at private/backups — run ./scripts/backup.sh first"
+  ARCHIVE_DIR="$(backups_dir)"
+  [ -d "$ARCHIVE_DIR" ] || die "no backups in $ARCHIVE_DIR — run ./scripts/backup.sh first"
   info "available backups"
 
   i=0; ENTRIES=''
-  for f in "$BACKUPS_DIR"/*.tar.gz; do
+  for f in "$ARCHIVE_DIR"/*.tar.gz; do
     [ -e "$f" ] || continue
     i=$((i + 1))
     ENTRIES="${ENTRIES}${i}:${f}
@@ -51,7 +66,7 @@ if [ -z "$TARGET" ]; then
       "$(basename "$f")"
   done
 
-  [ "$i" -gt 0 ] || die "no archives found in private/backups"
+  [ "$i" -gt 0 ] || die "no archives found in $ARCHIVE_DIR"
   printf '\n%sSelect a backup [1-%d]:%s ' "$C_BLUE" "$i" "$C_RESET"
   read -r choice
   TARGET="$(printf '%s' "$ENTRIES" | awk -F: -v n="$choice" '$1 == n { sub(/^[0-9]+:/, ""); print; exit }')"

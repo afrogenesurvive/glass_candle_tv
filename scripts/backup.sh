@@ -32,10 +32,11 @@ esac
 require_private_dir
 
 if [ "$LIST_ONLY" -eq 1 ]; then
-  [ -d "$BACKUPS_DIR" ] || { info "no backups yet"; exit 0; }
-  info "backups in private/backups"
+  ARCHIVE_DIR="$(backups_dir)"
+  [ -d "$ARCHIVE_DIR" ] || { info "no backups yet"; exit 0; }
+  info "backups in $ARCHIVE_DIR"
   found=0
-  for f in "$BACKUPS_DIR"/*.tar.gz; do
+  for f in "$ARCHIVE_DIR"/*.tar.gz; do
     [ -e "$f" ] || continue
     found=1
     printf '  %s  %9s  %s\n' \
@@ -51,10 +52,11 @@ require_env_file
 
 KEEP_DAYS="$(get_env BACKUP_KEEP_DAYS "$KEEP_DAYS_DEFAULT")"
 TS="$(timestamp)"
-ARCHIVE="$BACKUPS_DIR/freshrss-data-$TS.tar.gz"
-MANIFEST="$BACKUPS_DIR/MANIFEST-$TS.txt"
+ARCHIVE_DIR="$(backups_dir)"
+ARCHIVE="$ARCHIVE_DIR/freshrss-data-$TS.tar.gz"
+MANIFEST="$ARCHIVE_DIR/MANIFEST-$TS.txt"
 
-mkdir -p "$BACKUPS_DIR"
+mkdir -p "$ARCHIVE_DIR"
 
 # -----------------------------------------------------------------------------
 # What goes in
@@ -62,16 +64,20 @@ mkdir -p "$BACKUPS_DIR"
 # data/ holds subscriptions, categories, articles and read state — the only
 # thing here that cannot be regenerated from a config file.
 # private/env holds the passwords and tokens the services need to start.
+# rss-bridge/config.ini.php holds the shared bridge token. It lives at the
+# RSS-Bridge ROOT, not in its config/ subdirectory — that one is upstream's own
+# tooling (nginx.conf, php-fpm.conf) and contains nothing of ours, so archiving
+# it produced a backup that included junk and omitted the token.
 TARGETS=""
 [ -d "$FRESHRSS_DIR/data" ] && TARGETS="$TARGETS FreshRSS/data"
-[ -d "$RSSBRIDGE_DIR/config" ] && TARGETS="$TARGETS rss-bridge/config"
+[ -f "$RSSBRIDGE_DIR/config.ini.php" ] && TARGETS="$TARGETS rss-bridge/config.ini.php"
 [ -f "$ENV_FILE" ] && TARGETS="$TARGETS env"
 
 if [ -z "$TARGETS" ]; then
   die "nothing to back up — is FreshRSS installed? ($FRESHRSS_DIR)"
 fi
 
-info "backing up to private/backups"
+info "backing up to $ARCHIVE_DIR"
 dim "including:$TARGETS"
 
 # -----------------------------------------------------------------------------
@@ -113,9 +119,9 @@ ok "$(basename "$ARCHIVE")  ($(human_bytes "$(wc -c < "$ARCHIVE" | tr -d ' ')"))
 # common case of wanting to inspect or restore just one thing.
 DB_PATH="$(find "$FRESHRSS_DIR/data" -name 'db.sqlite' 2>/dev/null | head -n 1 || true)"
 if [ -n "$DB_PATH" ]; then
-  cp "$DB_PATH" "$BACKUPS_DIR/freshrss-$TS.sqlite3" 2>/dev/null \
-    && chmod 600 "$BACKUPS_DIR/freshrss-$TS.sqlite3" \
-    && ok "freshrss-$TS.sqlite3  ($(human_bytes "$(wc -c < "$BACKUPS_DIR/freshrss-$TS.sqlite3" | tr -d ' ')"))"
+  cp "$DB_PATH" "$ARCHIVE_DIR/freshrss-$TS.sqlite3" 2>/dev/null \
+    && chmod 600 "$ARCHIVE_DIR/freshrss-$TS.sqlite3" \
+    && ok "freshrss-$TS.sqlite3  ($(human_bytes "$(wc -c < "$ARCHIVE_DIR/freshrss-$TS.sqlite3" | tr -d ' ')"))"
 fi
 
 # -----------------------------------------------------------------------------
@@ -123,7 +129,7 @@ fi
 # -----------------------------------------------------------------------------
 info "pruning archives older than ${KEEP_DAYS} days"
 pruned=0
-for f in "$BACKUPS_DIR"/*.tar.gz "$BACKUPS_DIR"/*.sqlite3 "$BACKUPS_DIR"/MANIFEST-*.txt; do
+for f in "$ARCHIVE_DIR"/*.tar.gz "$ARCHIVE_DIR"/*.sqlite3 "$ARCHIVE_DIR"/MANIFEST-*.txt; do
   [ -e "$f" ] || continue
   if find "$f" -mtime "+${KEEP_DAYS}" -print | grep -q .; then
     rm -f "$f"
@@ -136,8 +142,8 @@ done
 # Manifest
 # -----------------------------------------------------------------------------
 FEED_COUNT=""
-if command -v sqlite3 >/dev/null 2>&1 && [ -f "$BACKUPS_DIR/freshrss-$TS.sqlite3" ]; then
-  FEED_COUNT="$(sqlite3 "$BACKUPS_DIR/freshrss-$TS.sqlite3" 'select count(*) from feed;' 2>/dev/null || true)"
+if command -v sqlite3 >/dev/null 2>&1 && [ -f "$ARCHIVE_DIR/freshrss-$TS.sqlite3" ]; then
+  FEED_COUNT="$(sqlite3 "$ARCHIVE_DIR/freshrss-$TS.sqlite3" 'select count(*) from feed;' 2>/dev/null || true)"
 fi
 
 {

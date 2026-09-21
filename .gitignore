@@ -8,28 +8,29 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# 0. private/ — ALL personal state lives here, and ONLY here
+# 0. private/ — safety net: personal state must never be committed
 # -----------------------------------------------------------------------------
-# One rule covers everything: deployment config, the feed database, cloned
-# third-party apps, generated service configs, logs and backups.
+# The live data is not here. It lives outside the repository entirely, at
+# ~/Library/Application Support/glass_candle_tv/private, because a launchd job
+# cannot read anything under ~/Documents (macOS TCC) and the feed-refresh agent
+# has to read it. See scripts/lib-common.sh for the measurement, and
+# docs/operations.md §1 for the layout.
 #
-# The repo folder contains nothing personal. If you can see it in a fresh
-# clone, it was safe to publish; everything else is under private/.
+# This rule is the backstop. An old checkout, a copy made in a hurry, or a stray
+# `mkdir private` must never become committable: one rule covers the whole
+# subtree, so "is this safe to publish" is answered by one question — is it
+# under private/ or not.
 #
-#     private/
+#     private/                 what it holds, wherever it lives
 #     ├── env                  deployment config (passwords, tokens)
 #     ├── apps/FreshRSS/       cloned code
 #     │   └── data/            ← subscriptions, categories, feeds, read state
 #     ├── apps/rss-bridge/
 #     │   └── config/config.ini.php
-#     ├── etc/                 generated nginx + php-fpm config
-#     ├── run/                 unix sockets, pid files
-#     ├── logs/
-#     └── backups/
-#
-# CREATE IT FIRST. `git check-ignore` reports "not ignored" for a non-existent
-# path when the rule has a trailing slash, so a bare assertion here is a false
-# negative. Verified with the directory present.
+#     ├── etc/                 generated RSS-Bridge router + bridge config
+#     ├── run/                 runtime scratch (services use TCP ports, not sockets)
+#     ├── logs/                service and refresh logs
+#     └── backups/             snapshots from scripts/backup.sh
 private/
 
 # Legacy Docker-era paths, kept so an old checkout cannot leak if it is ever
@@ -44,8 +45,9 @@ freshrss-data/
 # The master env file: FreshRSS API password, Instagram burner sessionid,
 # GitHub PAT, Cloudflare tunnel token.
 #
-# NOTE: the live file now lives at private/env. This stays because a stale
-# .env at the root would otherwise be committed silently.
+# NOTE: the live file is <data dir>/private/env, outside the repo — see the
+# section above. This stays because a stale .env at the root would otherwise be
+# committed silently.
 .env
 .env.*
 *.env

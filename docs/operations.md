@@ -7,6 +7,48 @@ Day-two operations: backup, restore, upgrade, rotate, diagnose.
 
 ---
 
+## Where the data lives
+
+Not in the repository. Everything personal is under `$BGC_PRIVATE`:
+
+```
+~/Library/Application Support/glass_candle_tv/private/
+```
+
+with a sibling `agent/` holding the copies of `refresh-feeds.sh` and `lib-common.sh` that
+launchd executes.
+
+This is a macOS constraint, not a preference. `~/Documents`, `~/Desktop` and
+`~/Downloads` are TCC-protected, and a process started by `launchd` cannot read a file
+there: the read fails with `Operation not permitted` and the agent records exit 126 —
+indistinguishable from a job that found nothing to do. The refresh agent is exactly such
+a job, and it has to read its own script and the data. A symlink out of `~/Documents`
+does not help; TCC resolves the target and denies that too. The measurement is recorded
+next to the paths in `scripts/lib-common.sh`.
+
+The consequence is narrower than it sounds: the repository may live anywhere, including
+`~/Documents/GitHub/…`, because `git`, your editor and these scripts all run from a
+terminal, which does have access. Only what a scheduled job must *read* has to move.
+Moving the repo therefore needs no path edits at all; the scripts resolve the data
+directory from `BGC_PRIVATE`, which can also be overridden for a throwaway run.
+
+To relocate the data:
+
+```bash
+DATA="$HOME/Library/Application Support/glass_candle_tv"
+./scripts/services.sh stop
+mkdir -p "$DATA"
+mv "<old place>/private" "$DATA/private"
+./scripts/services.sh install      # rewrites the plists, stages the agent scripts
+./scripts/healthcheck.sh
+```
+
+`services.sh install` is what deploys an edit to `refresh-feeds.sh`: launchd runs a copy
+of it from `agent/`, because it cannot read the repo. `healthcheck.sh` reports a stale
+copy, so the two cannot drift silently.
+
+---
+
 ## 1. Backup
 
 ```bash
@@ -133,24 +175,33 @@ pinned.
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Feeds never update | `CRON_MIN` empty | Set `CRON_MIN=13,43`, then `./scripts/services.sh restart refresh` |
-| Feeds update at the wrong time | `TZ` wrong | Fix `TZ`, restart the services |
+| Feeds never update | The refresh agent is failing to start | `tail -20 "$DATA/private/logs/refresh-stderr.log"` (with `DATA="$HOME/Library/Application Support/glass_candle_tv"`). `Operation not permitted` there means launchd cannot read the script or the data — check the location, then `./scripts/services.sh install` |
+| Feeds never update, no error anywhere | The agent is running an older copy of `refresh-feeds.sh` | Edit in the repo, then `./scripts/services.sh install` to stage it. `./scripts/healthcheck.sh` reports a stale copy |
+| Feeds update at the wrong time | `TZ` wrong | Fix `TZ` in `private/env`, then `./scripts/services.sh install` |
 | Service not answering | Agent crashed or never loaded | `./scripts/services.sh status`, then `restart` |
+| `refresh` exits non-zero | No admin account yet, or the FreshRSS CLI errored | `cat private/logs/refresh.log` — each block names the entry point and user it tried |
 | `Address already in use` in the logs | Something else holds the port | `lsof -nP -iTCP:8080 -sTCP:LISTEN` |
-| Bad token returns `200` | **`config.ini.php` is not in the RSS-Bridge root** | `./scripts/gen-configs.sh`, then restart |
+| Bad token returns `200` | **`config.ini.php` is not in the RSS-Bridge root** | `./scripts/gen-configs.sh` — no restart needed, the config is read per request |
 | Bridged feed is empty | Bridge name does not exist, or the site changed | Verify the name against `private/apps/rss-bridge/bridges/` |
 | Menu bar shows *stack is down* | A service is not running | `./scripts/services.sh status` |
 | Menu bar shows *password rejected* | API password mismatch | `./scripts/seed_menubar_config.sh` |
 | Everyone gets a 500 after upgrade | Schema migration pending | Open the web UI and follow the prompt |
 | Disk filling | Logs or refresh output | Check `private/logs/`, retention in `private/backups/` |
 
+> **`restart` does not re-read `private/env`.** `TZ`, `CRON_MIN`, the ports and the worker
+> count are baked into the launch agent plist XML when it is generated, so
+> `./scripts/services.sh restart` reloads the *existing* file and silently keeps the old
+> values. After changing any of them run `./scripts/services.sh install`. The `restart`
+> command warns when `private/env` is newer than the plists.
+
 ### Logs
 
 ```bash
-tail -f private/logs/freshrss-stderr.log      # the PHP server's own output
-tail -f private/logs/rssbridge-stderr.log
-tail -f private/logs/refresh.log              # one block per refresh
-./scripts/services.sh status                  # agent state + HTTP codes
+DATA="$HOME/Library/Application Support/glass_candle_tv"
+tail -f "$DATA/private/logs/freshrss-stderr.log"   # the PHP server's own output
+tail -f "$DATA/private/logs/rssbridge-stderr.log"
+tail -f "$DATA/private/logs/refresh.log"           # one block per refresh
+./scripts/services.sh status                       # agent state + HTTP codes
 ```
 
 ### launchd
@@ -198,10 +249,11 @@ does not un-leak them. Rotate first, clean second.
    `git push --force-with-lease`.
 5. The repository is **public**. Assume crawling happened within minutes.
 
-The root `.gitignore` covers `private/` as a single rule, so this should be impossible
-rather than merely unlikely. Note that plain `git check-ignore` **silently skips tracked
-paths** — always pass `--no-index` when validating rules, or it reports a false all-clear
-on precisely the file you are worried about.
+The root `.gitignore` covers `private/` as a single rule, and the live file is not in the
+repo at all (see *Where the data lives* above), so a leak means a copy was made into the
+repository — which the rule still catches. Note that plain `git check-ignore` **silently
+skips tracked paths** — always pass `--no-index` when validating rules, or it reports a
+false all-clear on precisely the file you are worried about.
 
 ---
 
@@ -212,13 +264,14 @@ on precisely the file you are worried about.
 ./scripts/services.sh uninstall         # unload + delete the launch agents
 ```
 
-`uninstall` removes only the launchd plists. **Nothing under `private/` is deleted** — your
-data survives, and `./scripts/install.sh` brings it all back.
+`uninstall` removes only the launchd plists. **Nothing in the data directory is
+deleted** — your data survives, and `./scripts/install.sh` brings it all back.
 
 To delete the data as well:
 
 ```bash
-rm -rf private/apps private/backups     # data and cloned code
+DATA="$HOME/Library/Application Support/glass_candle_tv"
+rm -rf "$DATA/private/apps" "$DATA/private/backups"   # data and cloned code
 ```
 
 There is no undo. Run `./scripts/backup.sh` first.

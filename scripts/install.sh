@@ -7,13 +7,17 @@
 #   ./scripts/install.sh --dry-run      # report what would happen
 #
 # What it does, in order:
-#   1. checks Homebrew + PHP + php-fpm, and installs nginx if missing
-#   2. creates private/ — the single gitignored home for all personal state
-#   3. creates private/env from .env.example if it does not exist
-#   4. clones FreshRSS and RSS-Bridge into private/apps/
-#   5. generates nginx + php-fpm + RSS-Bridge configs from private/env
-#   6. installs user-level launchd agents (nginx, php-fpm, feed refresh)
-#   7. creates the admin account via FreshRSS's CLI
+#   1. checks Homebrew + PHP (the built-in server is all that is needed)
+#   2. creates the data directory — OUTSIDE the repo, which is where all
+#      personal state lives and why the repo stays safe to publish
+#   3. creates the config file (env) from .env.example if it does not exist
+#   4. clones FreshRSS and RSS-Bridge into the data directory
+#   5. generates the RSS-Bridge request router and config from env
+#   6. installs user-level launchd agents (freshrss, rssbridge, refresh)
+#   7. creates the admin account via FreshRSS's CLI, if credentials are set
+#
+# Deliberately non-interactive: it never prompts, so it is safe to run from a
+# script. Set the admin login with ./scripts/set-admin-credentials.sh.
 #
 # Nothing is installed system-wide, and no step needs sudo.
 # =============================================================================
@@ -29,7 +33,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-services) DO_SERVICES=0 ;;
     --dry-run|-n)  DRY_RUN=1 ;;
-    -h|--help)     sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)             die "unknown argument: $1" ;;
   esac
   shift
@@ -83,36 +87,43 @@ fi
 # =============================================================================
 # 2. Directory skeleton
 # =============================================================================
-info "creating private/ layout"
+info "creating the data directory"
 
 run mkdir -p "$APPS_DIR" "$ETC_DIR" "$RUN_DIR" "$LOGS_DIR" "$BACKUPS_DIR"
-[ "$DRY_RUN" -eq 0 ] && ok "private/{apps,etc,run,logs,backups}"
+[ "$DRY_RUN" -eq 0 ] && ok "created {apps,etc,run,logs,backups}"
 
-# private/ must exist before anything asserts the ignore rule works, because
-# `git check-ignore` reports "not ignored" for a non-existent path.
-if [ "$DRY_RUN" -eq 0 ]; then
-  if git -C "$BGC_ROOT" check-ignore -q --no-index "private/env"; then
-    ok "private/ is gitignored"
-  else
-    die "private/ is NOT gitignored.
-       Fix .gitignore before putting anything personal in it."
-  fi
+# Outside the repo deliberately, and not as a matter of taste: the refresh agent
+# is started by launchd, and a launchd-spawned /bin/bash cannot read ~/Documents,
+# ~/Desktop or ~/Downloads at all (macOS TCC — the measurement is in
+# lib-common.sh). Anything a scheduled job must read therefore has to live
+# somewhere else. The repo may still live anywhere you like: git, the editor and
+# these scripts all run from a terminal, which does have access.
+printf '\n'
+dim "data directory: $BGC_PRIVATE"
+printf '\n'
+
+# An older in-repo private/ is reported rather than migrated: which copy is
+# authoritative is a decision for whoever has both in front of them.
+if [ -d "$BGC_ROOT/private" ]; then
+  warn "an older in-repo private/ still exists: $BGC_ROOT/private"
+  dim "the live data is now $BGC_PRIVATE"
+  dim "after checking its contents:  rm -rf \"$BGC_ROOT/private\""
 fi
 
 # =============================================================================
 # 3. Config file
 # =============================================================================
 if [ ! -f "$ENV_FILE" ]; then
-  info "creating private/env from the template"
+  info "creating the config file from the template"
   run cp "$ENV_EXAMPLE" "$ENV_FILE"
-  [ "$DRY_RUN" -eq 0 ] && ok "created private/env"
+  [ "$DRY_RUN" -eq 0 ] && ok "created $ENV_FILE"
   printf '\n'
-  warn "private/env is EMPTY of secrets. Fill it in before continuing:"
-  dim "  \$EDITOR private/env"
+  warn "the config file is EMPTY of secrets. Fill it in before continuing:"
+  dim "  \$EDITOR \"$ENV_FILE\""
   dim "  see docs/inputs_required.md for every value"
   printf '\n'
 else
-  ok "private/env exists"
+  ok "config file exists ($ENV_FILE)"
 fi
 
 if [ "$DRY_RUN" -eq 0 ]; then
@@ -123,11 +134,18 @@ if [ "$DRY_RUN" -eq 0 ]; then
 
   # ADMIN_EMAIL and ADMIN_PASSWORD are only inputs to creating the admin
   # account. Their absence is not fatal: the stack installs and runs perfectly
-  # well without an account, which can be created later from the web UI or by
-  # setting ADMIN_PASSWORD and re-running this script.
+  # well without an account, which can be created later from the web UI, or by
+  # setting these and re-running this script.
+  #
+  # Deliberately NOT prompted for here. An installer must never block on input:
+  # run non-interactively it hangs, and whatever text arrives next is consumed
+  # as the answer — which is how a shell command can end up stored as a
+  # password. Set these with scripts/set-admin-credentials.sh from a real
+  # terminal instead.
   if [ -z "$(get_env ADMIN_EMAIL)" ] || [ -z "$(get_env ADMIN_PASSWORD)" ]; then
     warn "ADMIN_EMAIL and/or ADMIN_PASSWORD are empty"
     dim "the admin account will NOT be created — see the end of this output"
+    dim "set them with:  ./scripts/set-admin-credentials.sh"
   fi
 fi
 
@@ -161,8 +179,8 @@ clone_if_missing "$FRESHRSS_DIR" "$FRESHRSS_REPO" "$FRESHRSS_BRANCH" "FreshRSS"
 clone_if_missing "$RSSBRIDGE_DIR" "$RSSBRIDGE_REPO" "" "RSS-Bridge"
 
 # FreshRSS keeps everything personal in ./data — the database, subscriptions,
-# categories, and per-user config. nginx's root points at ./p, so this directory
-# is not reachable over HTTP at all.
+# categories, and per-user config. The docroot points at ./p, a sibling of
+# data/, so this directory is not reachable over HTTP at all.
 if [ -d "$FRESHRSS_DIR" ] && [ "$DRY_RUN" -eq 0 ]; then
   mkdir -p "$FRESHRSS_DIR/data"
   chmod 700 "$FRESHRSS_DIR/data" 2>/dev/null || true
@@ -177,7 +195,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   dim "would run: ./scripts/gen-configs.sh"
 else
   "$SELF_DIR/gen-configs.sh" >/dev/null || die "config generation failed"
-  ok "RSS-Bridge router + bridge config written under private/"
+  ok "RSS-Bridge router + bridge config generated"
   dim "FreshRSS needs no router: its docroot is the app's p/ folder, so the"
   dim "data folder is never inside the served tree."
 fi
@@ -288,6 +306,6 @@ printf '       (Administration -> Authentication, then Profile)\n'
 printf '    3. ./scripts/seed_menubar_config.sh  configure the menu bar app\n'
 printf '    4. ./scripts/build.sh && open build/black_glass_candle.app\n'
 printf '\n'
-dim "All personal state lives in private/ and is gitignored."
-dim "nginx serves only FreshRSS's p/ directory; your data is not web-reachable."
+dim "All personal state lives outside the repo: $BGC_PRIVATE"
+dim "The docroot is FreshRSS's own p/ directory, so your data is not web-reachable."
 printf '\n'

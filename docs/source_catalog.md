@@ -171,6 +171,10 @@ wall of thumbnails into something closer to a reading experience.
 [ ] 11. Backup taken (scripts/backup.sh) before further changes
 ```
 
+Steps 1–7 are not "done" until the feed has been run through
+`./scripts/verify-feed.sh` and the result recorded in §8. A feed that parses and
+returns zero items satisfies none of them, and looks identical to a quiet one.
+
 **Step 11 is not optional.** Subscriptions are the one thing here you cannot regenerate
 from a config file.
 
@@ -181,14 +185,36 @@ from a config file.
 After adding a source, confirm it is genuinely working:
 
 ```bash
-# Does the feed exist and return items?
-curl -s "http://127.0.0.1:3000/?action=display&bridge=CssSelectorBridge&...&token=$RSSBRIDGE_TOKEN" \
-  | grep -c "<entry>"
+# Does the feed exist and return items? (counts items, prints the first title
+# and date, and exits non-zero on zero items)
+./scripts/verify-feed.sh "<the feed URL, with &token=... if it is bridged>"
 
-# Is FreshRSS actually receiving it? (list the users that exist)
+# Is FreshRSS actually receiving it?
 ./scripts/services.sh status
 ```
 
 Then in the web UI: the feed's **last pull** should be recent and **last update** should
 show items. A feed that pulls successfully but yields zero items is the failure mode to
 watch for — it looks healthy and is not.
+
+---
+
+## 8. Feed register
+
+The subscribed feeds, one row each, with the date each was last proven non-empty. This
+is what makes "the source is working" a recorded fact rather than an impression, and it
+is the acceptance artefact for source onboarding.
+
+Record a row when a feed is added, and update `Verified` and `Items` each time you
+re-run `./scripts/verify-feed.sh`. A row whose `Verified` date is old is a feed nobody
+has checked — not necessarily a broken one, but not a known-good one either.
+
+| Feed | URL | Category | Added | Verified | Items |
+| --- | --- | --- | --- | --- | --- |
+| *(none yet — onboarding has not started)* | | | | | |
+
+Category values are from §4: `Tech`, `Reading`, `Forums`, `Video`, `Social`, `Media`.
+
+When a feed fails verification, note what you did rather than deleting the row: a feed
+removed after a genuine attempt is a decision, and one that quietly disappears is a
+loose end.

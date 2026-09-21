@@ -140,7 +140,9 @@ enum ConnectionStatus: Sendable, Equatable {
     var remedy: String? {
         switch self {
         case .unreachable:
-            return "Is the stack running?  docker compose up -d"
+            // Also reached when a response fails to decode, so this points at
+            // the stack rather than claiming the network is down.
+            return "Check the stack:  ./scripts/services.sh status"
         case .unauthorized:
             return "Check the API password, then re-run scripts/seed_menubar_config.sh"
         case .apiDisabled:

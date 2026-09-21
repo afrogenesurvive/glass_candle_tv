@@ -4,8 +4,8 @@ Everything this project needs from you, how to obtain it, and what happens if it
 
 **How to use this document:** work top to bottom. Section A is decisions only you can
 make. Section B is secrets you invent. Section C is credentials you have to go and
-fetch. Section D is the source list. Fill in `.env` as you go — every row names the
-variable it maps to.
+fetch. Section D is the source list. Fill in `private/env` as you go — every row names
+the variable it maps to.
 
 **Legend:** 🔴 full account/instance access · 🟠 scoped credential · 🟡 rate-limit
 or convenience · 🟢 not secret
@@ -16,20 +16,20 @@ or convenience · 🟢 not secret
 
 These have no "correct" answer, but the whole stack's defaults depend on them.
 
-| # | Input | `.env` variable | Notes |
+| # | Input | `private/env` variable | Notes |
 | --- | --- | --- | --- |
 | A1 | Your IANA timezone | `TZ` | e.g. `America/Jamaica`. Full list at [php.net/timezones](https://www.php.net/timezones). **A wrong value does not error** — it silently shifts every date, and `today` filters return the wrong day. |
 | A2 | Where the stack runs | `DEPLOY_TARGET` | `local` (this Mac), `vps`, or `pi`. Determines whether you need remote access at all. |
 | A3 | Ports | `FRESHRSS_PORT`, `RSSBRIDGE_PORT` | 8080 / 3000 unless taken. `lsof -i :8080` to check. |
 | A4 | Do you read on other devices? | `SERVER_DNS`, `REVERSE_PROXY` | **No** → stay local, skip section C5 entirely. **Yes** → you need a hostname, HTTPS, and the `Allow API access` toggle. |
-| A5 | Backup destination and retention | `BACKUP_DIR`, `BACKUP_KEEP_DAYS` | Keep outside this repo. Defaults to `~/Backups/black_glass_candle` for 30 days. |
+| A5 | Backup destination and retention | `BACKUP_DIR`, `BACKUP_KEEP_DAYS` | Where `backup.sh` writes, and where `restore.sh` and `healthcheck.sh` look. Keep it outside this repo: `private/` is gitignored, but a `git clean -xdf` would take your backups with it. Defaults to `~/Backups/black_glass_candle`, 30 days. |
 | A6 | **Your feed list** | `FORUM_TARGETS` + web UI | The actual sources. See [`source_catalog.md`](./source_catalog.md). |
 
 ---
 
 ## B. Secrets you invent
 
-| # | Input | `.env` variable | How to generate |
+| # | Input | `private/env` variable | How to generate |
 | --- | --- | --- | --- |
 | B1 | Web UI login password | `ADMIN_PASSWORD` | Your password manager |
 | B2 | FreshRSS **API** password | `ADMIN_API_PASSWORD` | `openssl rand -base64 24` |
@@ -72,11 +72,14 @@ Full account credentials. **Use a burner account, never your personal one.**
 Instagram has no public feed API, so the only route to your own feed is to replay a
 logged-in browser session. That means copying live session cookies into a config file.
 
-| Value | `.env` variable | Where to find it |
+| Value | `private/env` variable | Where to find it |
 | --- | --- | --- |
 | `sessionid` | `INSTAGRAM_SESSIONID` | DevTools → Application → Storage → Cookies → `https://www.instagram.com` |
 | `ds_user_id` | `INSTAGRAM_DS_USER_ID` | same |
-| `csrftoken` | `INSTAGRAM_CSRFTOKEN` | same |
+
+`csrftoken` is often cited as a third value to copy. This RSS-Bridge release does not use
+it: `InstagramBridge` declares only `session_id` and `ds_user_id`, so
+`INSTAGRAM_CSRFTOKEN` is accepted and then ignored. Copying it is harmless but pointless.
 
 **Expiry:** these die whenever the burner logs out or changes password, and Meta
 rotates sessions on their own schedule. Expect to re-paste them every few weeks.
@@ -105,24 +108,26 @@ when you want an org-wide feed that Atom cannot express.
 
 Alternatively use a fine-grained token with read-only *Metadata* + *Contents*.
 
-`.env` variable: `GITHUB_TOKEN`
+`private/env` variable: `GITHUB_TOKEN`. Emitted as `[GithubReleaseBridge] token` in the
+generated RSS-Bridge config.
 
 **If it leaks:** revoke it. It grants read access to public repository data under your
 identity, which is a rate-limit and attribution problem, not a code-theft problem —
 provided you did not add extra scopes.
 
-### C3 — Reddit application credentials 🟡
+### C3 — Reddit application credentials � NOT SUPPORTED
 
-Only needed if the anonymous `RedditBridge` starts returning 429s.
+**Do not go and fetch these.** This RSS-Bridge release cannot use them: `RedditBridge`
+declares no configurable options at all, so `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`
+reach no code path and no bridge. They are still present in `.env.example` so an existing
+file does not silently lose lines.
 
-1. Visit [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)
-2. Create an app → type **script** → redirect URI can be `http://localhost`
-3. Client ID is under the app name; the secret is labelled `secret`
+If `RedditBridge` starts returning 429s:
 
-`.env` variables: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`
-
-**Try first without these.** Set `RSSBRIDGE_USER_AGENT` to a normal browser string — that
-resolves most rate limiting on its own.
+1. Set `RSSBRIDGE_USER_AGENT` to a normal browser string. That resolves most cases.
+2. Otherwise drop the sub. Reddit actively fights unauthenticated access, and
+   [`source_catalog.md`](./source_catalog.md) treats removing it as a legitimate
+   outcome rather than a failure.
 
 ### C4 — Forum CSS selectors 🟢
 
@@ -148,8 +153,9 @@ NAME|URL|ITEM_SELECTOR|TITLE_SELECTOR|LINK_SELECTOR|DATE_SELECTOR
 Blank `DATE_SELECTOR` is allowed if the listing has no dates.
 
 **Verify immediately** — a wrong selector returns a feed with zero items, which looks
-identical to a forum with no new posts. Subscribe it and confirm it is non-empty before
-moving on.
+identical to a forum with no new posts. Run
+`./scripts/verify-feed.sh "<the bridged URL, token included>"` before subscribing, and
+record the result in [`source_catalog.md`](./source_catalog.md) §8.
 
 ### C5 — Cloudflare Tunnel token 🔴
 
@@ -158,7 +164,7 @@ moving on.
 Cloudflare dashboard → Zero Trust → Networks → Tunnels → create → copy the connector
 token. Requirement: you already own the domain and it is on Cloudflare.
 
-`.env` variable: `CLOUDFLARE_TUNNEL_TOKEN`
+`private/env` variable: `CLOUDFLARE_TUNNEL_TOKEN`
 
 **If it leaks:** anyone with the token can run a connector for your tunnel and route
 traffic to services on your network. Revoke in the dashboard — the token is the only
@@ -174,7 +180,7 @@ credential, so revocation is immediate and total.
 
 Discord → channel settings → Integrations → Webhooks → New Webhook → Copy URL.
 
-`.env` variable: `DISCORD_WEBHOOK_URL`
+`private/env` variable: `DISCORD_WEBHOOK_URL`
 
 **If it leaks:** anyone can post messages into that channel. Not a data risk, an
 annoyance risk. Delete and recreate the webhook to revoke.
@@ -224,7 +230,7 @@ Copy this into your own notes and tick as you go.
 
 [ ] C1  instagram burner        = set / skipped (ENABLE_INSTAGRAM=0)
 [ ] C2  GITHUB_TOKEN            = set / skipped
-[ ] C3  reddit credentials      = set / skipped
+[ ] C3  reddit credentials      = N/A, unsupported in this release
 [ ] C4  forum selectors         = ____ forums, all verified non-empty
 [ ] C5  remote access creds     = set / skipped (local only)
 [ ] C6  discord webhook         = set / skipped
@@ -236,9 +242,13 @@ Copy this into your own notes and tick as you go.
 
 ## F. Handling rules
 
-1. `.env` is gitignored. It has been gitignored since before it existed, on purpose.
-2. Never paste `.env` contents into a doc, an issue, a screenshot, or a chat message.
-3. Back up `.env` to your password manager, not to a synced folder.
+1. `private/env` lives **outside the checkout**, at
+   `~/Library/Application Support/glass_candle_tv/private/env` — see *Where the data
+   lives* in [`operations.md`](./operations.md) for why. `private/` is gitignored as well,
+   so a stray copy inside the repository cannot be committed either.
+2. Never paste `private/env` contents into a doc, an issue, a screenshot, or a chat
+   message.
+3. Back up `private/env` to your password manager, not to a synced folder.
 4. `RSSBRIDGE_TOKEN` and `ADMIN_API_PASSWORD` appear in URLs and logs. If you ever paste
    a feed URL while debugging, treat it as having leaked.
 5. Rotating `ADMIN_API_PASSWORD` requires re-seeding the menu bar app:

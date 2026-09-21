@@ -46,9 +46,11 @@ No web server package is needed: both apps are served by PHP's own built-in serv
 ```bash
 git clone <this repo> && cd glass_candle_tv
 
-# 1. Configure
-cp .env.example private/env          # or let the installer do it
-$EDITOR private/env                  # see docs/inputs_required.md
+# 1. Configure. Personal state lives outside the repo — see "Where your data lives".
+DATA="$HOME/Library/Application Support/glass_candle_tv"
+mkdir -p "$DATA/private"
+cp .env.example "$DATA/private/env"   # or let the installer do it
+$EDITOR "$DATA/private/env"           # see docs/inputs_required.md
 
 # 2. Install everything: clones both apps, generates config, loads launchd agents
 ./scripts/install.sh
@@ -70,20 +72,46 @@ open build/black_glass_candle.app    # first launch: right-click -> Open
 
 ## Where your data lives
 
-**`private/` is gitignored in full.** The repository contains nothing personal — if you
-can see it in a fresh clone, it was safe to publish.
+**Everything personal lives outside the repository**, in
+`~/Library/Application Support/glass_candle_tv`. The repo is safe to publish — if you can
+see it in a fresh clone, it was safe to publish.
 
 ```
-private/
-├── env                   deployment config: passwords and tokens (mode 600)
-├── apps/FreshRSS/
-│   └── data/             ← subscriptions, categories, feeds, read state, database
-├── apps/rss-bridge/      cloned code + config.ini.php (the shared token)
-├── etc/                  generated request router
-├── logs/                 service and refresh logs
-├── run/                  pid files
-└── backups/              snapshots from scripts/backup.sh
+~/Library/Application Support/glass_candle_tv/
+├── private/
+│   ├── env               deployment config: passwords and tokens (mode 600)
+│   ├── apps/FreshRSS/
+│   │   └── data/         ← subscriptions, categories, feeds, read state, database
+│   ├── apps/rss-bridge/  cloned code + config.ini.php (the shared token)
+│   ├── etc/              generated request router
+│   ├── logs/             service and refresh logs
+│   ├── run/              runtime scratch
+│   └── backups/          snapshots from scripts/backup.sh
+└── agent/               copies of the scripts launchd executes
 ```
+
+**Why not in the repo?** macOS privacy protection (TCC) covers `~/Documents`,
+`~/Desktop` and `~/Downloads`: a process started by `launchd` cannot read a file there
+at all. The feed refresh and both PHP servers are launchd jobs. The failure is quiet —
+`Operation not permitted`, exit 126, which looks exactly like a job with nothing to do —
+so it was measured rather than assumed:
+
+| read issued by a launchd job | result |
+| --- | --- |
+| `<repo>/README.md`, repo under `~/Documents` | `Operation not permitted` (exit 126) |
+| the same file reached through a symlink | `Operation not permitted` — TCC resolves it |
+| anything under the data directory above | ok |
+
+So the **repository can live anywhere you like** — `git`, your editor and these scripts
+all run from a terminal, which does have access — but everything a scheduled job has to
+*read* lives in the data directory. That is the data, and `agent/`, which holds the
+copies of `refresh-feeds.sh` and `lib-common.sh` that `services.sh install` deploys:
+edit the scripts in the repo, then re-run `./scripts/services.sh install`.
+`healthcheck.sh` reports a stale copy rather than letting the schedule keep running old
+code.
+
+`private/` is still gitignored, as a backstop: an old checkout, a copy made in a hurry,
+or a stray `mkdir private` can never be committed by accident.
 
 The web server's document root for FreshRSS is its own `p/` directory — which is exactly
 what FreshRSS's documentation asks for:
@@ -113,7 +141,7 @@ URL that resolves to it, so this is structural rather than a rule that could be 
 | --- | --- |
 | `./scripts/install.sh` | Full native install. Idempotent. |
 | `./scripts/gen-configs.sh` | Regenerate the router and RSS-Bridge config from `private/env` |
-| `./scripts/services.sh` | `install` / `start` / `stop` / `restart` / `status` / `uninstall` the launchd agents |
+| `./scripts/services.sh` | `install` / `start` / `stop` / `restart` / `status` / `uninstall` the launchd agents. `install` also stages the agent scripts and is what deploys an edit to them. |
 | `./scripts/refresh-feeds.sh` | Refresh every feed. Run by launchd on the `CRON_MIN` schedule. |
 | `./scripts/backup.sh` | Snapshot the data directory and config. `--list` to see them. |
 | `./scripts/restore.sh` | Restore a snapshot. The current data is moved aside, not deleted. |
@@ -124,7 +152,9 @@ URL that resolves to it, so this is structural rather than a rule that could be 
 
 ## Security notes
 
-- **`private/` holds everything personal and is gitignored**, by a single root-level rule.
+- **Everything personal lives outside the repository**, in
+  `~/Library/Application Support/glass_candle_tv`. `private/` stays gitignored as a
+  backstop, so a stray copy inside the repo cannot be committed either.
 - **Both services bind to `127.0.0.1` only.** Your feed reader and its login page are not
   reachable from other machines on the network.
 - **RSS-Bridge requires a token** on every feed URL. This is verified, not assumed: a bad

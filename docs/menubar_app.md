@@ -114,7 +114,7 @@ unread pressure, in the same visual language as `DS-mon`'s LED column.
 
 | State | Flame | Meaning |
 | --- | --- | --- |
-| Stack unreachable | Grey, stubbed | Docker isn't running, or the URL is wrong |
+| Stack unreachable | Grey, stubbed | The services aren't running, or the URL is wrong |
 | 0 unread | Dim blue, minimum height | Caught up |
 | 1–10 unread | Green | Normal |
 | 11–40 unread | Amber | Backlog forming |
@@ -235,7 +235,7 @@ The app is unsigned. First launch requires **right-click → Open** to clear Gat
 
 ## 10. Caveats
 
-- **The app is a client, not a server.** With Docker stopped it shows `unreachable` and
+- **The app is a client, not a server.** With the services stopped it shows `unreachable` and
   nothing else works. That is by design; it does not cache articles.
 - **Local-only by default.** `127.0.0.1` means it works on this Mac only. Reading from
   another device means the web UI, not this app.

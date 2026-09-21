@@ -10,11 +10,41 @@ set -euo pipefail
 
 BGC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Everything personal lives under private/ — config, the feed database, cloned
-# apps, generated service configs, logs and backups. One gitignore rule covers
-# the whole subtree, so "is this safe to publish" is answered by one question:
-# is it under private/ or not.
-BGC_PRIVATE="$BGC_ROOT/private"
+# -----------------------------------------------------------------------------
+# Where personal state lives — outside the repository, deliberately
+# -----------------------------------------------------------------------------
+# $BGC_PRIVATE holds the config, the feed database, the cloned apps, generated
+# service configs, logs and backups. It is NOT inside the repo, and that is a
+# macOS requirement rather than a tidiness preference:
+#
+#   The feed-refresh agent is started by launchd, and a launchd-spawned
+#   /bin/bash has no Files-and-Folders grant for ~/Documents, ~/Desktop or
+#   ~/Downloads (TCC). Every read there fails and the job dies with exit 126.
+#
+# Measured 2026-09-21 from a throwaway launch agent:
+#     head <repo>/README.md            -> "Operation not permitted"   (exit 126)
+#     head <this data dir>/anything    -> ok
+#     head <symlink-to-repo>/README.md -> "Operation not permitted"   (TCC resolves
+#                                        the link and denies the target too)
+#
+# So the repository may live anywhere — git, the editor and these scripts all run
+# from a terminal, which does have access — but everything a launchd job must
+# READ has to sit outside those folders. That is the data here, and the copies of
+# the agent scripts in $AGENT_DIR below.
+#
+# Point a run at a throwaway data set with:
+#     BGC_PRIVATE=/tmp/bgc-test ./scripts/healthcheck.sh
+BGC_DATA="${BGC_DATA:-$HOME/Library/Application Support/glass_candle_tv}"
+BGC_PRIVATE="${BGC_PRIVATE:-$BGC_DATA/private}"
+
+# launchd executes its scripts from here, never from the repo — same reason.
+# `services.sh install` copies them, so this is the deployment step that decides
+# which code the scheduled job actually runs.
+AGENT_DIR="${AGENT_DIR:-$BGC_DATA/agent}"
+
+# Exactly what gets staged. Extend the list when a new launchd job is added.
+AGENT_FILES="lib-common.sh refresh-feeds.sh"
+
 ENV_FILE="$BGC_PRIVATE/env"
 ENV_EXAMPLE="$BGC_ROOT/.env.example"
 APPS_DIR="$BGC_PRIVATE/apps"
@@ -91,13 +121,14 @@ get_env() {
 }
 
 require_env_file() {
-  [ -f "$ENV_FILE" ] || die "no config at private/env
-       Create it:  cp .env.example private/env   (then fill it in)
+  [ -f "$ENV_FILE" ] || die "no config at $ENV_FILE
+       Create it:  cp .env.example \"$ENV_FILE\"   (then fill it in)
        Or let the installer do it:  ./scripts/install.sh"
 }
 
 require_private_dir() {
-  [ -d "$BGC_PRIVATE" ] || die "private/ is missing.  Run: ./scripts/install.sh"
+  [ -d "$BGC_PRIVATE" ] || die "no data directory at $BGC_PRIVATE
+       Run: ./scripts/install.sh"
 }
 
 # require_vars VAR [VAR...] — fail listing every missing var, not just the first.
@@ -163,6 +194,17 @@ agent_state() {
   fi
 }
 
+# The exit status launchd recorded for the last run of an agent, or empty if it
+# has never run. This is the only cheap way to tell a calendar job that is
+# idle between firings from one that fires and immediately dies: both report
+# state = loaded, but only the second records a non-zero status here. A non-zero
+# value means launchd itself failed to start the job (typically EPERM while
+# reading the script), which is distinct from the script exiting non-zero.
+agent_last_exit() {
+  local label; label="$(label_for "$1")"
+  launchctl list 2>/dev/null | awk -v l="$label" '$3 == l { print $2; exit }'
+}
+
 bootout_agent() {
   local label; label="$(label_for "$1")"
   if agent_loaded "$1"; then
@@ -207,6 +249,31 @@ port_holder() {
 # -----------------------------------------------------------------------------
 timestamp() { date "+%Y%m%d-%H%M%S"; }
 
+# Replace one key's value in private/env, in place. The write counterpart to
+# get_env, which is deliberately read-only.
+#
+# The value travels through the environment rather than as a command argument so
+# it cannot be read out of `ps`, and the file is rewritten via a temp file in the
+# same directory so an interrupted run cannot leave a truncated config behind.
+# A key that is absent is appended; get_env takes the LAST match, so the result
+# is unambiguous either way.
+set_env_value() {
+  local key="$1" value="$2" tmp
+  [ -f "$ENV_FILE" ] || die "no config file at $ENV_FILE"
+  tmp="$(mktemp "$(dirname "$ENV_FILE")/.env.XXXXXX")"
+  if ! BGC_NEW_VALUE="$value" awk -v key="$key" '
+        BEGIN { val = ENVIRON["BGC_NEW_VALUE"]; done = 0 }
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" { print key "=" val; done = 1; next }
+        { print }
+        END { if (!done) print key "=" val }
+      ' "$ENV_FILE" > "$tmp"; then
+    rm -f "$tmp"
+    die "could not rewrite $ENV_FILE"
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" "$ENV_FILE"
+}
+
 # Expand a leading ~ so paths from .env work in [ -d ] tests and mkdir.
 expand_path() {
   case "$1" in
@@ -214,6 +281,20 @@ expand_path() {
     "~")   printf '%s' "$HOME" ;;
     *)     printf '%s' "$1" ;;
   esac
+}
+
+# Where backup archives live. BACKUP_DIR lets you keep them outside the
+# repository, which is the safer choice: private/ is gitignored, but a
+# `git clean -xdf` would still take the backups with it, and a backup sharing a
+# volume with the thing it protects is a half-measure. Reads AND writes go
+# through here so a restore can never look somewhere different from the backup.
+backups_dir() {
+  local configured; configured="$(get_env BACKUP_DIR)"
+  if [ -n "$configured" ]; then
+    expand_path "$configured"
+  else
+    printf '%s' "$BACKUPS_DIR"
+  fi
 }
 
 confirm() {

@@ -37,25 +37,41 @@ printf '\n%sglass_candle_tv — healthcheck%s\n\n' "$C_BLUE" "$C_RESET"
 info "layout"
 
 if [ -d "$BGC_PRIVATE" ]; then
-  pass "private/ exists"
+  pass "data directory present — $BGC_PRIVATE"
 else
-  fail "private/ is missing — run: ./scripts/install.sh"
+  fail "data directory is missing: $BGC_PRIVATE — run: ./scripts/install.sh"
   printf '\n'
   exit 1
 fi
 
-# This is the invariant the whole design rests on. If private/ ever stops being
-# ignored, every secret and the entire feed database become committable.
-if git -C "$BGC_ROOT" check-ignore -q --no-index "private/env" 2>/dev/null; then
-  pass "private/ is gitignored"
-else
-  fail "private/ is NOT gitignored — fix .gitignore immediately"
+# The data must not sit inside a macOS-protected folder. The refresh agent runs
+# from launchd, and a launchd-spawned /bin/bash has no Files-and-Folders grant
+# for ~/Documents, ~/Desktop or ~/Downloads: the script cannot even be read, the
+# job dies with exit 126, and the symptom is a reader that quietly stops
+# updating. Verified by measurement, not assumed — see lib-common.sh.
+case "$BGC_PRIVATE" in
+  "$HOME/Documents"/*|"$HOME/Desktop"/*|"$HOME/Downloads"/*)
+    fail "the data directory is inside a macOS-protected folder — launchd cannot read it"
+    dim "move it out — see 'Where the data lives' in docs/operations.md — then re-run"
+    dim "./scripts/services.sh install"
+    ;;
+  *)
+    pass "data directory is outside the macOS-protected folders"
+    ;;
+esac
+
+# The repo itself must stay free of personal state. `private/` is still covered
+# by .gitignore as a safety net, but the live data is no longer there, so what is
+# worth asserting is that no second copy has crept back in.
+if [ -d "$BGC_ROOT/private" ]; then
+  note "a private/ directory exists inside the repo: $BGC_ROOT/private"
+  dim "it is not the live data and launchd cannot read it — delete it when you are sure"
 fi
 
 if [ -f "$ENV_FILE" ]; then
-  pass "private/env present ($(stat -f '%Sp' "$ENV_FILE" 2>/dev/null || echo '?'))"
+  pass "config present ($ENV_FILE, $(stat -f '%Sp' "$ENV_FILE" 2>/dev/null || echo '?'))"
 else
-  fail "private/env is missing — run: cp .env.example private/env"
+  fail "config is missing: $ENV_FILE — run: cp .env.example \"$ENV_FILE\""
 fi
 
 # The single most important security property: the feed database must not be
@@ -93,7 +109,11 @@ if [ -f "$ENV_FILE" ]; then
   fi
 
   if [ -z "$(get_env CRON_MIN)" ]; then
-    fail "CRON_MIN is empty — feeds will NEVER refresh"
+    # Not a failure natively. services.sh falls back to StartInterval 1800, so
+    # an empty CRON_MIN degrades the schedule to every 30 minutes rather than
+    # removing it — the Docker stack's behaviour was the opposite.
+    note "CRON_MIN is empty — falling back to a 30-minute interval"
+    dim "set it in private/env, then re-run ./scripts/services.sh install"
   else
     pass "CRON_MIN=$(get_env CRON_MIN) (feeds refresh on this schedule)"
   fi
@@ -117,11 +137,39 @@ else
   fail "php not on PATH"
 fi
 
+# The refresh agent executes a COPY of these scripts from the data directory, so
+# the code that runs on a schedule can be older than the code in the repo. That
+# is the most confusing failure this layout can produce — "I changed it and
+# nothing happened" — so it is checked rather than trusted.
+for f in $AGENT_FILES; do
+  if [ ! -f "$AGENT_DIR/$f" ]; then
+    fail "agent copy missing: $AGENT_DIR/$f — run ./scripts/services.sh install"
+  elif ! cmp -s "$BGC_ROOT/scripts/$f" "$AGENT_DIR/$f"; then
+    note "stale agent copy: $f — run ./scripts/services.sh install to deploy it"
+  fi
+done
+
 for svc in freshrss rssbridge refresh; do
   state="$(agent_state "$svc")"
   case "$state" in
     running)    pass "$svc: running" ;;
-    loaded)     [ "$svc" = "refresh" ] && pass "$svc: scheduled" || note "$svc: loaded but not running" ;;
+    loaded)
+      if [ "$svc" != "refresh" ]; then
+        note "$svc: loaded but not running"
+        continue
+      fi
+      # A calendar job is legitimately idle between firings, so "loaded" on its
+      # own proves nothing — reporting PASS here is how a job that fails every
+      # single run stays invisible. launchd's recorded exit status is the
+      # evidence: non-zero means it fired and died before the script could run.
+      last_exit="$(agent_last_exit refresh)"
+      if [ -n "$last_exit" ] && [ "$last_exit" -ne 0 ] 2>/dev/null; then
+        fail "refresh: job is failing (last exit $last_exit) — feeds are NOT refreshing"
+        dim "see private/logs/refresh-stderr.log"
+      else
+        pass "$svc: scheduled"
+      fi
+      ;;
     not-loaded) fail "$svc: not loaded — run ./scripts/services.sh install" ;;
   esac
 done
@@ -205,32 +253,52 @@ fi
 # -----------------------------------------------------------------------------
 info "maintenance"
 
+# refresh.log is written by refresh-feeds.sh itself, so its absence means the
+# script never got as far as its own first line. launchd capturing an error in
+# refresh-stderr.log instead is a different — and much more serious — situation:
+# the job is firing and dying. Reporting both as "has not run yet" is what makes
+# a permanently dead refresh job look like a quiet news week.
 if [ -f "$LOGS_DIR/refresh.log" ]; then
-  last="$(grep -c 'exit 0 — ok' "$LOGS_DIR/refresh.log" 2>/dev/null || echo 0)"
-  if [ "$last" -gt 0 ]; then
-    pass "feed refresh has run successfully ($last time(s) logged)"
+  # `grep -c` prints 0 AND exits non-zero when there are no matches, so the
+  # familiar `... || echo 0` idiom produces "00" and breaks the numeric test
+  # below. Capture, then normalise — same trap as http_code() in lib-common.sh.
+  ok_count="$(grep -c 'exit 0 — ok' "$LOGS_DIR/refresh.log" 2>/dev/null)" || true
+  [ -n "$ok_count" ] || ok_count="0"
+  if [ "$ok_count" -gt 0 ]; then
+    pass "feed refresh has run successfully ($ok_count time(s) logged)"
   else
-    note "refresh has run but never succeeded — see private/logs/refresh.log"
+    note "refresh has run but never succeeded"
+    dim "see $LOGS_DIR/refresh.log"
   fi
+elif [ -s "$LOGS_DIR/refresh-stderr.log" ]; then
+  fail "refresh has never reached the script — launchd cannot start it"
+  dim "$LOGS_DIR/refresh-stderr.log holds the errors"
+  dim "'Operation not permitted' there means launchd cannot read the script:"
+  dim "re-run ./scripts/services.sh install to stage it into $AGENT_DIR"
 else
-  note "feed refresh has not run yet — see private/logs/refresh.log"
+  note "feed refresh has not run yet — see $LOGS_DIR/refresh.log"
 fi
 
-if [ -d "$BACKUPS_DIR" ]; then
-  count="$(find "$BACKUPS_DIR" -name '*.tar.gz' 2>/dev/null | wc -l | tr -d ' ')"
+ARCHIVE_DIR="$(backups_dir)"
+if [ -d "$ARCHIVE_DIR" ]; then
+  count="$(find "$ARCHIVE_DIR" -name '*.tar.gz' 2>/dev/null | wc -l | tr -d ' ')"
   if [ "$count" -gt 0 ]; then
-    pass "$count backup(s) in private/backups"
+    pass "$count backup(s) in $ARCHIVE_DIR"
   else
-    note "no backups yet — run ./scripts/backup.sh"
+    note "no backups yet in $ARCHIVE_DIR — run ./scripts/backup.sh"
   fi
+else
+  # Report the location even when it does not exist yet, so a mis-set
+  # BACKUP_DIR is visible rather than silently producing no line at all.
+  note "backups directory does not exist: $ARCHIVE_DIR — run ./scripts/backup.sh"
 fi
 
 size="$(du -sk "$BGC_PRIVATE" 2>/dev/null | awk '{print $1 * 1024}')"
 if [ -n "$size" ]; then
-  pass "private/ is $(human_bytes "$size")"
+  pass "data directory is $(human_bytes "$size")"
 fi
 
-avail="$(df -k "$BGC_ROOT" | tail -1 | awk '{print $4 * 1024}')"
+avail="$(df -k "$BGC_PRIVATE" | tail -1 | awk '{print $4 * 1024}')"
 if [ -n "$avail" ]; then
   if [ "$avail" -lt 2147483648 ]; then
     note "only $(human_bytes "$avail") free on this volume"

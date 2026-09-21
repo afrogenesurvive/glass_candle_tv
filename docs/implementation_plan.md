@@ -81,13 +81,16 @@ check passes.
 
 | Item | Detail |
 | --- | --- |
-| Deliverables | `.gitignore`, `.env.example`, `.env`, `README.md`, `docs/`, `scripts/` |
+| Deliverables | `.gitignore`, `.env.example`, `env` (created by `install.sh`), `README.md`, `docs/`, `scripts/` |
 | Key files | `.gitignore`, `.env.example` |
-| Acceptance | `git check-ignore -q --no-index .env` exits 0; `git status --short` never lists `.env`; every secret-shaped path in the repo is ignored |
-| Status | ✅ done |
+| Acceptance | `git status --short` never lists anything personal, and every secret-shaped path in the repo is ignored. The live data directory sits outside the checkout entirely, so the only remaining failure mode is a copy being made into the repo |
+| Status | ✅ done — later amended: the data directory now lives outside the repo (`[0.0.1-2]` in [`CHANGELOG.md`](./CHANGELOG.md), *Where the data lives* in [`operations.md`](./operations.md)) |
 
-> The `.gitignore` is written **before** `.env` exists on purpose. A credentials file
-> that appears in `git status` once is already too late.
+> The `.gitignore` was written **before** `env` existed on purpose: a credentials file that
+> appears in `git status` once is already too late. In that revision the live file sat
+> under `private/` rather than at the repository root so a single rule covered it together
+> with the feed database, logs, generated config and backups — and so `backup.sh`, which
+> archives from inside that directory, picked it up without a special case.
 
 ### WS1 — Native service infrastructure
 
@@ -114,22 +117,49 @@ Requirements that the upstream scaffold omits and that this plan adds:
 | Deliverables | Running instance with admin user, API enabled, API password set, categories created, Youlag installed |
 | Acceptance | `curl` `POST /api/greader.php/accounts/ClientLogin` with `Email` + `Passwd` returns a line beginning `Auth=` |
 
-> ⚠️ **First-run only.** `FRESHRSS_INSTALL` and `FRESHRSS_USER` are consumed exactly once,
-> when the `freshrss_data` volume is empty. Editing `.env` afterwards has **no effect**.
-> To change them you must `docker compose down -v`, which deletes every subscription.
-> Change values in the web UI instead.
+| Status | ⬜ not started |
 
-Categories to create: `Tech`, `Forums`, `Social`, `Video`, `Reading`.
+> ⚠️ **Account creation is skipped when the credentials are blank.** `install.sh` creates
+> the admin account from `ADMIN_EMAIL` + `ADMIN_PASSWORD` in `private/env`. Leave either
+> blank and it skips that step entirely: the services start normally, the API stays
+> unusable, and the menu bar app reports "Password rejected". There is no volume to
+> recreate — fill the values in and re-run `./scripts/install.sh`. Afterwards, change the
+> account in the web UI; the env values are not re-applied on later runs.
+>
+> The **"Allow API access"** toggle is separate and manual. `install.sh` sets the API
+> password (`cli/create-user.php --api-password`) but nothing can set `api_enabled` — the
+> API returns 503 until the toggle is on, even with the password already stored.
+
+Categories to create: `Tech`, `Reading`, `Forums`, `Video`, `Social`, `Media`
+(see [`source_catalog.md`](./source_catalog.md) §4).
 
 ### WS3 — RSS-Bridge configuration
 
 | Item | Detail |
 | --- | --- |
-| Deliverables | `rss-bridge-config/config.ini.php` generated from `.env`, token auth active, bridge allowlist applied |
+| Deliverables | `private/apps/rss-bridge/config.ini.php` generated from `private/env`, token auth active, bridge allowlist applied |
 | Acceptance | `http://127.0.0.1:3000/?action=display&bridge=CssSelectorBridge&format=Atom&token=$RSSBRIDGE_TOKEN` is rejected without a valid token; a wrong token returns `401`; `config/`, `cache/` and `bridges/` all return `404` |
+| Status | 🟡 token auth and the allowlist both verified; credential plumbing corrected |
 
 The explicit allowlist is a security control, not tidiness: RSS-Bridge ships 400+ bridges,
 several of which make server-side outbound requests on your behalf.
+
+Two properties of that allowlist are easy to get wrong, and **both fail silently** — the
+file looks correct while doing nothing:
+
+- `enabled_bridges[]` must sit **under `[system]`**. `BridgeFactory` reads
+  `Configuration::getConfig('system', 'enabled_bridges')`, and a bare `enabled_bridges[]`
+  line is parsed as belonging to whichever section header precedes it. Put it after
+  `[cache]` and the list is ignored, leaving upstream's default of `*` — every bridge —
+  in force.
+- Only the keys a bridge declares in its own `CONFIGURATION` constant can be set from the
+  config file, in a section named after the bridge class (`[GithubReleaseBridge] token`,
+  `[InstagramBridge] session_id`). Several credentials in wide circulation are declared by
+  no bridge in this release and therefore cannot be set at all: Reddit's client id and
+  secret, and Instagram's `csrftoken`.
+
+A useful diagnostic: a **400** means the bridge is not allowlisted, a **500** means it is
+allowlisted and failed for some other reason.
 
 ### WS4 — Source onboarding
 
@@ -168,9 +198,23 @@ This is the workstream that delivers the actual goal. WS1–WS5 are plumbing.
 
 ## 5. Sequencing
 
+Status as of 2026-09-21. Kept here rather than inferred from the prose, because a plan
+whose section markers all read as pending is indistinguishable from one that is half done.
+
+| WS | Scope | Status |
+| --- | --- | --- |
+| WS0 | Repository skeleton | ✅ done |
+| WS1 | Native service infrastructure | 🟡 both services running on loopback; the `refresh` agent was failing on every run (macOS privacy restriction on the repo's location) and was fixed by relocating the repository |
+| WS2 | FreshRSS configuration | ⬜ not started — no admin account yet, so the API returns 400 |
+| WS3 | RSS-Bridge configuration | 🟡 token auth verified; the allowlist was inert until `enabled_bridges[]` was moved under `[system]` |
+| WS4 | Source onboarding | ⬜ 0 of 11 checklist steps; blocked on the feed list (input A6) |
+| WS5 | Menu bar application | 🟡 builds and launches; acceptance not yet exercised, and it cannot pass until WS2 completes |
+| WS6 | Taming the flow | ⬜ blocked on WS4 |
+| WS7 | Operations | 🟡 scripts complete and corrected; no backup has been taken, so the restore acceptance is still unrunnable |
+
 ```mermaid
 graph LR
-  WS0["WS0<br/>skeleton ✅"] --> WS1["WS1<br/>docker"]
+  WS0["WS0<br/>skeleton ✅"] --> WS1["WS1<br/>native PHP"]
   WS1 --> WS2["WS2<br/>freshrss"]
   WS1 --> WS3["WS3<br/>rss-bridge"]
   WS2 --> WS4["WS4<br/>sources"]
@@ -196,7 +240,7 @@ URLs by hand is genuinely punishing.
 | Cookie expiry for Instagram | Certain | Low | Documented re-paste procedure; failure shows as an empty feed, not a crash |
 | Forum CSS selectors rot when the forum restyles | Medium | Medium | One `FORUM_TARGETS` line per forum; breakage is isolated to that line |
 | Reddit rate-limits the anonymous bridge | Medium | Medium | `RSSBRIDGE_USER_AGENT` escape hatch; Reddit OAuth credentials as fallback |
-| Re-running `FRESHRSS_INSTALL` with changed values does nothing | High (if unaware) | High | Documented above and in `.env.example`; the failure is silent, which is why it is called out twice |
+| `ADMIN_PASSWORD` left blank, so account creation is skipped | High (if unaware) | High | `install.sh` warns, `healthcheck.sh` reports it, and both are documented in `.env.example` and `docs/inputs_required.md`. Silent otherwise, which is why it is called out twice |
 | Unbacked-up feed database lost | Low | High | WS7 moved earlier in the sequence; `backup.sh` before WS4 |
 | Menu bar app pins a macOS version you later move off | Low | Low | Single `platforms:` line in `Package.swift` |
 
