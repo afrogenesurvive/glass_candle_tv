@@ -1,3 +1,17 @@
+> **Historical document — superseded.**
+>
+> This is the original upstream tutorial the project started from, kept for provenance.
+> It describes a **Docker** deployment that this project no longer uses: the stack now runs
+> natively on PHP, for the reasons set out in [`implementation_plan.md`](./implementation_plan.md).
+> Its `docker-compose.yml`, volume layout and `docker compose` commands are **not** current
+> instructions.
+>
+> It also names several RSS-Bridge bridges that **do not exist** (`HackerNewsBridge`,
+> `LemmyBridge`, `BearBlogBridge`, `GitHubBridge`). See [`source_catalog.md`](./source_catalog.md)
+> for verified names.
+
+---
+
 **DeepSeeksaid**:
 
 Here is a step-by-step guide to building the setup you've described. The goal is to create a central hub where you pull in content from all your sources, strip out the algorithmic feeds, and read intentionally.

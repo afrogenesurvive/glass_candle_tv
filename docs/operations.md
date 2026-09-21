@@ -2,8 +2,8 @@
 
 Day-two operations: backup, restore, upgrade, rotate, diagnose.
 
-The feed database is the asset. Everything else here can be rebuilt from `.env` and this
-repo in ten minutes. Read §1 before you need it.
+**The feed database is the asset.** Everything else here can be rebuilt from
+`private/env` and this repository in ten minutes. Read §1 before you need it.
 
 ---
 
@@ -14,75 +14,73 @@ repo in ten minutes. Read §1 before you need it.
 ./scripts/backup.sh --list       # show existing backups
 ```
 
-Writes to `$BACKUP_DIR` (default `~/Backups/black_glass_candle`):
+Writes to `private/backups/`:
 
 | Artefact | Contents |
 | --- | --- |
-| `freshrss-<ts>.sqlite3` | Users, subscriptions, categories, read/unread state, filters |
-| `subscriptions-<ts>.opml` | Portable subscription list — restorable into *any* reader |
-| `env-<ts>.enc` | Encrypted `.env` (skipped if `age` is unavailable) |
-| `MANIFEST-<ts>.txt` | FreshRSS version, feed count, checksums |
+| `freshrss-data-<ts>.tar.gz` | `data/` (subscriptions, categories, articles, read state) + `env` + the bridge config |
+| `freshrss-<ts>.sqlite3` | A standalone copy of the database, for inspecting or restoring one thing |
+| `MANIFEST-<ts>.txt` | Host, checksum, feed count, PHP version, retention |
 
 Retention: `BACKUP_KEEP_DAYS`, default 30.
 
-> **The OPML file is the important one.** An SQLite file restores this instance; an OPML
-> file restores your subscriptions into anything. Keep both, and keep a copy off this Mac.
+Natively this is a plain `tar` of a folder. There is no VM disk image to go through and no
+`docker run` needed to extract a volume — you can open the result in Finder. The freshrss
+service is stopped for the duration: its SQLite database runs in write-ahead-log mode, and
+copying the files mid-write risks a torn snapshot. A clean shutdown checkpoints the WAL
+first. The outage is a few seconds.
 
-**Do a backup before:** adding more than a handful of feeds, upgrading, changing the
-database backend, or `docker compose down -v`.
+> **The OPML export is the portable artefact.** An archive restores *this* instance; an
+> OPML restores your subscriptions into anything. Get one from the web UI
+> (*Subscription management → Export*) and keep a copy off this machine.
+
+**Do a backup before:** adding more than a handful of feeds, upgrading, or changing
+anything in `private/etc/`.
 
 ### Restore
 
 ```bash
-./scripts/restore.sh                     # interactive: lists backups, asks which
-./scripts/restore.sh <path-to-sqlite3>   # non-interactive
+./scripts/restore.sh                     # interactive: lists backups by size and date
+./scripts/restore.sh <archive.tar.gz>    # non-interactive
 ```
 
-Restore stops the containers, replaces the database inside the `freshrss_data` volume,
-and restarts.
+The current `data/` directory is **moved aside**, not deleted, to
+`data.pre-restore-<timestamp>`. A mistaken restore is then a single `mv` back.
 
 **Verify a restore before you need it.** A backup you have never restored is a hypothesis,
 not a backup. Once, deliberately:
 
 ```bash
-docker compose down -v            # destroys everything
-docker compose up -d
 ./scripts/restore.sh <latest>
 ```
 
-If your subscriptions are back, you have a working backup. If you are not willing to run
-this, you do not have a backup.
-
-### OPML-only recovery
-
-If the SQLite file is corrupt but the OPML survived:
-
-1. `docker compose up -d`
-2. Log in → Subscription management → **Import** → select the OPML
-3. Recreate categories and re-apply mute/hide — these are **not** carried in OPML
+If your subscriptions come back, you have a working backup. If you are not willing to run
+that, you do not have a backup.
 
 ---
 
 ## 2. Upgrade
 
 ```bash
-./scripts/upgrade.sh             # backup, pull, recreate, health check
+./scripts/upgrade.sh             # backup, git pull, restart, verify
 ./scripts/upgrade.sh --dry-run   # show what would change
 ```
 
-Pinned vs rolling:
+Both apps are git checkouts in `private/apps/`, so an upgrade is `git pull` rather than
+pulling container images. `--ff-only` is used deliberately: a merge commit would mean the
+clone has local edits, which these scripts never make.
 
-| Setting | Behaviour |
-| --- | --- |
-| `freshrss/freshrss:latest` | Latest tagged release. **Recommended.** |
-| `freshrss/freshrss:1.30.0` | Exact version. Use if an upgrade breaks something. |
-| `freshrss/freshrss:edge` | Rolling. Breaks without warning. |
+**Your data is untouched by an upgrade** — it lives in `data/`, a sibling of the code.
+That separation is the main reason the layout survived the move away from Docker.
 
-Youlag requires FreshRSS ≥ 1.30.0. If you pin an older version, YouTube mode stops
-working.
+**Rollback:** Docker used to record image digests for you; git has no equivalent unless
+you write it down. The script prints the current commit hashes before pulling. To go back:
 
-**Rollback:** `git` does not track container images. Record the previous tag in
-`MANIFEST-*.txt` before upgrading, then set it back and `docker compose up -d`.
+```bash
+git -C private/apps/FreshRSS log --oneline -5
+git -C private/apps/FreshRSS checkout <commit>
+./scripts/services.sh restart freshrss
+```
 
 ---
 
@@ -90,65 +88,79 @@ working.
 
 ### `ADMIN_API_PASSWORD` (used by the menu bar app)
 
-1. FreshRSS → Profile → API password → set new value
-2. Update `ADMIN_API_PASSWORD` and `MENUBAR_API_PASSWORD` in `.env`
+1. FreshRSS → Profile → API password → set the new value
+2. Update `ADMIN_API_PASSWORD` and `MENUBAR_API_PASSWORD` in `private/env`
 3. `./scripts/seed_menubar_config.sh`
 4. Re-open the menu bar app
 
-No restart required — the app re-authenticates on the next `401`.
+No restart needed — the app re-authenticates on the next `401`.
 
 ### `RSSBRIDGE_TOKEN`
 
-1. `openssl rand -hex 24` → update `RSSBRIDGE_TOKEN` in `.env`
-2. `./scripts/gen-rssbridge-config.sh` and restart RSS-Bridge
-3. **Every existing bridged subscription URL now contains the old token and will 401.**
-   Update the feed URL for each bridged feed in FreshRSS subscription management.
+1. `openssl rand -hex 24` → update `RSSBRIDGE_TOKEN` in `private/env`
+2. `./scripts/gen-configs.sh`
+3. `./scripts/services.sh restart rssbridge`
 
-Step 3 is the expensive part. Treat this as a break-glass action.
+> ⚠️ **Every existing bridged subscription URL still contains the old token**, and will now
+> return `401`. Update the feed URL for each bridged feed in FreshRSS subscription
+> management. Treat this as a break-glass action.
+
 ### Compromised credential
 
 | Credential | Action |
 | --- | --- |
 | `GITHUB_TOKEN` | Revoke at GitHub → Settings → Developer settings → PATs. Issue a new one. |
-| `CLOUDFLARE_TUNNEL_TOKEN` | Delete the tunnel in the Zero Trust dashboard. Create a new one. |
 | `DISCORD_WEBHOOK_URL` | Delete the webhook, create a new one. |
 | Instagram burner cookies | Log out of the burner everywhere. Change its password. Re-paste cookies. |
-| `ADMIN_PASSWORD` (web UI) | Change in the web UI. If the instance is exposed, rotate `TZ`-independent things too — check `docker compose logs freshrss` for unexpected source IPs. |
-| `.env` committed to git | See §6. |
+| `ADMIN_PASSWORD` (web UI) | Change it in the web UI. Check `private/logs/` for unexpected requests first. |
+| `private/env` committed to git | See §6. |
 
 ---
 
 ## 4. Diagnostics
 
 ```bash
-./scripts/healthcheck.sh          # one-shot status of the whole stack
+./scripts/healthcheck.sh          # one-shot status of everything
+./scripts/healthcheck.sh --quiet  # only problems
 ```
 
-What it checks: container state, port reachability, FreshRSS HTTP response, RSS-Bridge
-HTTP response, freshness of the last feed pull, and disk usage of the volumes.
+It checks: layout and privacy invariants, config sanity, launchd agent state, both HTTP
+endpoints, **that the data directory is outside the web document root**, that RSS-Bridge
+rejects a bad token, refresh history, backup presence, disk space, and whether PHP is
+pinned.
 
 ### Decision table
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Feeds never update | `CRON_MIN` empty | Set `CRON_MIN=13,43`, restart |
-| Feeds update at the wrong time of day | `TZ` wrong | Fix `TZ`, restart |
-| Bridged feeds fail to fetch | `INTERNAL_HOST_ALLOWLIST` missing | Must include `rss-bridge:80` |
-| All feeds fine, one bridged feed empty | Bridge broken or selector rotted | Test the bridge URL directly with curl |
-| `Service Unavailable` from the API | API access toggle off | FreshRSS → Authentication → "Allow API access" |
-| Menu bar shows *stack is down* | Docker not running | `docker compose up -d` |
-| Menu bar shows *password rejected* | API password mismatch | Re-run `seed_menubar_config.sh` |
-| Container restarts in a loop | Volume permissions | `docker compose logs freshrss \| tail -50` |
-| Disk filling | Uncapped container logs | Confirm `logging.options.max-size` is set |
-| Everything 500s after upgrade | Version incompatibility | Pin the previous tag, restore backup |
+| Feeds never update | `CRON_MIN` empty | Set `CRON_MIN=13,43`, then `./scripts/services.sh restart refresh` |
+| Feeds update at the wrong time | `TZ` wrong | Fix `TZ`, restart the services |
+| Service not answering | Agent crashed or never loaded | `./scripts/services.sh status`, then `restart` |
+| `Address already in use` in the logs | Something else holds the port | `lsof -nP -iTCP:8080 -sTCP:LISTEN` |
+| Bad token returns `200` | **`config.ini.php` is not in the RSS-Bridge root** | `./scripts/gen-configs.sh`, then restart |
+| Bridged feed is empty | Bridge name does not exist, or the site changed | Verify the name against `private/apps/rss-bridge/bridges/` |
+| Menu bar shows *stack is down* | A service is not running | `./scripts/services.sh status` |
+| Menu bar shows *password rejected* | API password mismatch | `./scripts/seed_menubar_config.sh` |
+| Everyone gets a 500 after upgrade | Schema migration pending | Open the web UI and follow the prompt |
+| Disk filling | Logs or refresh output | Check `private/logs/`, retention in `private/backups/` |
 
 ### Logs
 
 ```bash
-docker compose logs -f --timestamps freshrss
-docker compose logs -f --timestamps rss-bridge
-docker compose ps
+tail -f private/logs/freshrss-stderr.log      # the PHP server's own output
+tail -f private/logs/rssbridge-stderr.log
+tail -f private/logs/refresh.log              # one block per refresh
+./scripts/services.sh status                  # agent state + HTTP codes
 ```
+
+### launchd
+
+```bash
+launchctl print gui/$(id -u)/com.afrogenesurvive.glass-candle-tv.freshrss
+```
+
+A service that is `loaded` but not `running` is usually crash-looping; `ThrottleInterval`
+is 10s, so the logs will show repeated startup attempts.
 
 ---
 
@@ -157,37 +169,56 @@ docker compose ps
 | Cadence | Task |
 | --- | --- |
 | Weekly | Glance at the menu bar. A source that has been empty for a week is broken, not quiet. |
-| Monthly | `./scripts/backup.sh` and confirm it exists. Check Youlag for updates. |
-| Quarterly | Restore a backup into a scratch directory to prove it works. Re-check forum selectors. |
+| Monthly | `./scripts/backup.sh`. Check Youlag for updates. |
+| Quarterly | Restore a backup to prove it works. Re-check forum CSS selectors. |
 | On breakage | Instagram cookies, forum selectors, Reddit rate limits. See [`source_catalog.md`](./source_catalog.md). |
 
----
+### Pinning PHP
 
-## 6. Incident: `.env` committed to git
-
-If a secrets file ever reaches git, **the secrets are already compromised.** Rewriting
-history does not un-leak them. Rotate first, clean second.
-
-1. **Rotate everything in that file.** Use the table in §3. Assume full compromise.
-2. Confirm the ignore rule works:
-   `git check-ignore -v --no-index .env`
-3. Remove from the index: `git rm --cached .env`
-4. If it was pushed, clean history with `git filter-repo` and force-push with
-   `git push --force-with-lease`.
-5. Consider whether the repo is public. If it is, assume crawling happened within minutes.
-
-The `.gitignore` in this repo covers `.env` and its variants. Note that plain
-`git check-ignore` **silently skips tracked paths**, so it reports nothing for exactly the
-file you are worried about — always pass `--no-index` when validating rules.
-
----
-
-## 7. Destroying the stack
+The `php` Homebrew formula is not pinned by default, so `brew upgrade` can move PHP under
+the running services and they will fail to restart.
 
 ```bash
-docker compose down              # stop, keep all data
-docker compose down -v           # stop AND delete volumes — subscriptions gone
+brew pin php      # hold the version currently verified against this stack
 ```
 
-`down -v` removes `freshrss_data`, which is everything. Run `./scripts/backup.sh` first.
-There is no undo.
+`healthcheck.sh` warns while this is unpinned.
+
+---
+
+## 6. Incident: `private/env` committed to git
+
+If a secrets file reaches git, **the secrets are already compromised.** Rewriting history
+does not un-leak them. Rotate first, clean second.
+
+1. **Rotate everything in that file.** Use the table in §3.
+2. Confirm the ignore rule works: `git check-ignore -v --no-index private/env`
+3. Remove from the index: `git rm --cached private/env`
+4. If it was pushed, clean history with `git filter-repo`, then
+   `git push --force-with-lease`.
+5. The repository is **public**. Assume crawling happened within minutes.
+
+The root `.gitignore` covers `private/` as a single rule, so this should be impossible
+rather than merely unlikely. Note that plain `git check-ignore` **silently skips tracked
+paths** — always pass `--no-index` when validating rules, or it reports a false all-clear
+on precisely the file you are worried about.
+
+---
+
+## 7. Stopping and removing
+
+```bash
+./scripts/services.sh stop              # stop everything, keep all data
+./scripts/services.sh uninstall         # unload + delete the launch agents
+```
+
+`uninstall` removes only the launchd plists. **Nothing under `private/` is deleted** — your
+data survives, and `./scripts/install.sh` brings it all back.
+
+To delete the data as well:
+
+```bash
+rm -rf private/apps private/backups     # data and cloned code
+```
+
+There is no undo. Run `./scripts/backup.sh` first.

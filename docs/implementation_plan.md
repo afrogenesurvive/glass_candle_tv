@@ -33,11 +33,11 @@ graph TB
     IG[Instagram - burner]
   end
 
-  subgraph "rss-bridge container"
+  subgraph "rss-bridge (PHP)"
     RB[RSS-Bridge<br/>token-auth HTTP feed generator]
   end
 
-  subgraph "freshrss container"
+  subgraph "freshrss (PHP)"
     FR[FreshRSS<br/>storage, filters, mute, API]
   end
 
@@ -61,7 +61,7 @@ graph TB
   FR --> DC
 ```
 
-**Why two containers.** RSS-Bridge turns "sites that have no feed" into feeds.
+**Why two applications.** RSS-Bridge turns "sites that have no feed" into feeds.
 FreshRSS stores, deduplicates, categorises and schedules. They are different jobs with
 different failure modes; keeping them separate means a broken bridge cannot corrupt the
 feed database.
@@ -89,24 +89,23 @@ check passes.
 > The `.gitignore` is written **before** `.env` exists on purpose. A credentials file
 > that appears in `git status` once is already too late.
 
-### WS1 — Container infrastructure
+### WS1 — Native service infrastructure
 
 | Item | Detail |
 | --- | --- |
-| Deliverables | `docker-compose.yml`, `rss-bridge-config/config.ini.php.example`, `freshrss-extensions/` |
-| Acceptance | `docker compose config -q` exits 0; `docker compose up -d` leaves both containers `healthy`; `curl -sf http://127.0.0.1:8080` returns HTML; ports are bound to `$BIND_ADDR`, not `0.0.0.0` |
+| Deliverables | `scripts/install.sh`, `scripts/gen-configs.sh`, `scripts/services.sh`, launchd agents |
+| Acceptance | `./scripts/install.sh` completes; all three launchd agents report `running`/`scheduled`; both endpoints answer on loopback; `./scripts/healthcheck.sh` reports no failures |
 
 Requirements that the upstream scaffold omits and that this plan adds:
 
 | # | Requirement | Why |
 | --- | --- | --- |
-| 1 | `CRON_MIN` set | Without it the cron daemon is **disabled** and feeds never refresh. The instance looks healthy while going quietly stale. |
-| 2 | `TZ` from `.env` | A wrong TZ does not error; it silently shifts every date and breaks "today" filters. |
-| 3 | `INTERNAL_HOST_ALLOWLIST=rss-bridge:80` | FreshRSS blocks internal hosts by default, so bridged feeds fail to fetch. |
-| 4 | Ports bound to `$BIND_ADDR` | `"8080:80"` exposes the login page to the whole local network. |
-| 5 | `logging.options.max-size` | Uncapped container logs will fill the disk. |
-| 6 | Healthcheck on both services | A crashed container is otherwise indistinguishable from a quiet news day. |
-| 7 | No `version:` key | Obsolete in Compose v2; produces a warning on every command. |
+| 1 | `CRON_MIN` wired to a launchd `StartCalendarInterval` | Without it the refresh job is never scheduled and feeds silently never update. The instance looks healthy while going stale. |
+| 2 | `TZ` passed to PHP as `date.timezone` | A wrong TZ does not error; it silently shifts every date and breaks "today" filters. |
+| 3 | Both listeners bound to `127.0.0.1` | Binding to all interfaces exposes the login page to the whole local network. |
+| 4 | Logs written under `private/logs` | Without a location you control, diagnosing a crash means guessing. |
+| 5 | A healthcheck on each service | A crashed process is otherwise indistinguishable from a quiet news day. |
+| 6 | `private/` gitignored before it is populated | A credentials file that appears in `git status` once is already too late. |
 
 ### WS2 — FreshRSS configuration
 
@@ -127,7 +126,7 @@ Categories to create: `Tech`, `Forums`, `Social`, `Video`, `Reading`.
 | Item | Detail |
 | --- | --- |
 | Deliverables | `rss-bridge-config/config.ini.php` generated from `.env`, token auth active, bridge allowlist applied |
-| Acceptance | `http://127.0.0.1:3000/?action=display&bridge=HackerNewsBridge&format=Atom&token=$RSSBRIDGE_TOKEN` returns valid Atom; the same URL with a wrong token returns a 403 |
+| Acceptance | `http://127.0.0.1:3000/?action=display&bridge=CssSelectorBridge&format=Atom&token=$RSSBRIDGE_TOKEN` is rejected without a valid token; a wrong token returns `401`; `config/`, `cache/` and `bridges/` all return `404` |
 
 The explicit allowlist is a security control, not tidiness: RSS-Bridge ships 400+ bridges,
 several of which make server-side outbound requests on your behalf.
@@ -145,7 +144,7 @@ several of which make server-side outbound requests on your behalf.
 | Item | Detail |
 | --- | --- |
 | Deliverables | `black_glass_candle.app`, built by `scripts/build.sh` |
-| Acceptance | Candle appears in the menu bar; unread count updates without restarting the app; clicking opens the popover; "Open FreshRSS" launches the web UI; app relaunches cleanly after `docker compose down` (shows a *stack down* state, not a crash) |
+| Acceptance | Candle appears in the menu bar; unread count updates without restarting the app; clicking opens the popover; "Open FreshRSS" launches the web UI; app relaunches cleanly after `./scripts/services.sh stop` (shows a *stack down* state, not a crash) |
 | Design | [`menubar_app.md`](./menubar_app.md) |
 
 ### WS6 — Taming the flow
@@ -207,9 +206,9 @@ URLs by hand is genuinely punishing.
 
 | Decision | Rationale |
 | --- | --- |
-| Docker Compose over native installs | Reproducible, isolated, trivially removable. A native PHP+nginx install on macOS is a maintenance burden with no upside here. |
-| SQLite over Postgres | One user. Postgres adds a container, a port, a password and a migration path for no benefit. |
-| Named volumes for data, bind mounts for config | Data should survive `docker compose down`; config should be editable and diffable. |
+| Native PHP services over containers | On macOS, Docker keeps volumes inside one opaque VM disk image that Time Machine excludes, and its own docs advise against putting a database on a bind mount — so "data in a private folder" and "Docker on macOS" were mutually exclusive. PHP was already installed, so dropping containers cost no new dependency. |
+| Document root set to FreshRSS's own `p/` directory | Makes the personal-data directory structurally unreachable over HTTP rather than merely unlinked. Verified with requests, not assumed. |
+| A router script in front of RSS-Bridge | Its document root must also hold `config.ini.php` (the token) and a cache directory. The router permits only `/` and `/static/`. |
 | Native Swift menu bar app over a SwiftBar plugin | Matches the existing `DS-mon` toolchain, shares its build script shape, and gives real SwiftUI for the popover. |
 | Keychain over a custom encrypted key file | Removes an entire class of "where did the key file go" bugs. A hand-rolled AES-GCM key file has to manage its own permissions, backup and migration; the Keychain is strictly less to get wrong. |
 | Programmatic icon over bundled PNG | No binary assets in git, no `.process()` resource declarations to keep in sync, and a template image adapts automatically to light/dark menu bars. |

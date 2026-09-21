@@ -18,13 +18,13 @@ These have real RSS/Atom. Prefer them: no scraping, no breakage, no token.
 | Hacker News, best comments | `https://hnrss.org/bestcomments?points=100` | Tech | High signal-to-noise |
 | Bear Blog | `<site>/feed` | Reading | Convention is `/feed`; some use `/blog/feed` |
 | Most personal blogs | `<site>/feed`, `/rss`, `/atom.xml`, `/index.xml` | Reading | Try in that order |
-| GitHub releases | `https://github.com/<owner>/<repo>/releases.atom` | Tech | No token, no bridge, no rate limit — **prefer this over `GitHubBridge`** |
+| GitHub releases | `https://github.com/<owner>/<repo>/releases.atom` | Tech | No token, no bridge, no rate limit — **prefer this over any GitHub bridge** |
 | GitHub commits | `https://github.com/<owner>/<repo>/commits/<branch>.atom` | Tech | Same |
 | Most blogs on Substack/Ghost/WordPress | `<site>/feed` | Reading | |
 | YouTube channels | `https://www.youtube.com/feeds/videos.xml?channel_id=UC…` | Video | See §2 for finding the ID |
 
 > **Try the native feed before reaching for a bridge.** `releases.atom` is strictly better
-> than `GitHubBridge`: no token, no rate limit, and it cannot break when GitHub changes
+> than any GitHub bridge: no token, no rate limit, and it cannot break when GitHub changes
 > page markup.
 
 ---
@@ -69,19 +69,22 @@ These need RSS-Bridge. All require `&token=$RSSBRIDGE_TOKEN`.
 
 | | |
 | --- | --- |
-| Bridge | `LemmyBridge` |
-| Example | `/bridge=LemmyBridge&community=<name>@<instance>&format=Atom` |
-| Breaks when | Rarely — Lemmy is ActivityPub and pubic by design |
+| Bridge | **None ships in this RSS-Bridge release.** `LemmyBridge` does not exist, despite appearing in many guides. |
+| Check first | Whether your instance exposes a feed for the community directly |
+| Fallback | `CssSelectorBridge` against the community page |
 | Notes | Instance must allow anonymous reads |
+
+> Do not add a bridge name you have not confirmed. RSS-Bridge ignores unknown names
+> silently, so a subscription to a non-existent bridge simply never returns items.
 
 ### GitHub (orgs and multi-repo)
 
 | | |
 | --- | --- |
-| Bridge | `GitHubBridge` |
+| Bridge | **`GitHubBridge` does not exist.** The real names are `GithubReleaseBridge`, `GithubTrendingBridge`, `GithubSearchBridge`, `GithubPullRequestBridge`, `GithubIssueBridge`. |
 | Credentials | `GITHUB_TOKEN` (raises 60/hr → 5000/hr) |
-| **Prefer** | `releases.atom` / `commits.atom` for single repos — those need no token at all |
-| Use bridge only | When you want an org-wide feed that Atom cannot express |
+| **Prefer** | `releases.atom` / `commits.atom` for single repos — no token, no rate limit, and they cannot break when GitHub changes its markup |
+| Use a bridge only | When you want an org-wide feed that Atom cannot express |
 
 ### Instagram
 
@@ -182,8 +185,8 @@ After adding a source, confirm it is genuinely working:
 curl -s "http://127.0.0.1:3000/?action=display&bridge=CssSelectorBridge&...&token=$RSSBRIDGE_TOKEN" \
   | grep -c "<entry>"
 
-# Is FreshRSS actually receiving it?
-docker compose exec freshrss cli/list-users.php
+# Is FreshRSS actually receiving it? (list the users that exist)
+./scripts/services.sh status
 ```
 
 Then in the web UI: the feed's **last pull** should be recent and **last update** should

@@ -240,4 +240,6 @@ The app is unsigned. First launch requires **right-click → Open** to clear Gat
 - **Local-only by default.** `127.0.0.1` means it works on this Mac only. Reading from
   another device means the web UI, not this app.
 - **One user.** It stores a single set of credentials. Multi-account is out of scope.
-- **No offline reading.** FreshRSS is the source of truth and it lives in a container.
+- **No offline reading.** FreshRSS is the source of truth, and it runs as a background
+  service on this machine. With it stopped, the app shows *stack unreachable* and nothing
+  else works.

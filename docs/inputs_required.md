@@ -91,7 +91,12 @@ rotates sessions on their own schedule. Expect to re-paste them every few weeks.
 
 ### C2 — GitHub personal access token 🟠
 
-Used by `GitHubBridge` to lift the anonymous rate limit of 60 requests/hour.
+Used by the GitHub bridges (`GithubReleaseBridge`, `GithubTrendingBridge`) to lift the
+anonymous rate limit of 60 requests/hour.
+
+**Often unnecessary.** `https://github.com/<owner>/<repo>/releases.atom` needs no token,
+has no rate limit, and cannot break when GitHub changes its markup. Reach for a token only
+when you want an org-wide feed that Atom cannot express.
 
 1. GitHub → Settings → Developer settings → **Personal access tokens (classic)**
 2. Generate new token, scopes: **`public_repo`** and **`read:org`**. Nothing else.
