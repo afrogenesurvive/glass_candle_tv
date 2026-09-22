@@ -105,7 +105,8 @@ enum FlameLevel: Int, Sendable, CaseIterable {
 ///
 /// Each case is distinct because each one has a *different fix*. Collapsing them
 /// into a single "error" would leave the user staring at a grey candle with no
-/// idea whether to start Docker or change a password.
+/// idea whether to start the services (`./scripts/services.sh start`) or change
+/// a password.
 enum ConnectionStatus: Sendable, Equatable {
     case unconfigured
     case idle

@@ -111,7 +111,7 @@ actor FreshRSSAPI {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 12
         cfg.timeoutIntervalForResource = 25
-        // Must be false. With it on, a stopped Docker daemon produces a long
+        // Must be false. With it on, a stopped launchd agent produces a long
         // hang instead of the immediate "stack is down" the user should see.
         cfg.waitsForConnectivity = false
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -364,7 +364,7 @@ actor FreshRSSAPI {
             switch error.code {
             // There is no `.connectionRefused` case. A refused connection on a
             // loopback address surfaces as `.cannotConnectToHost`, which is the
-            // single most common failure here (Docker is not running).
+            // single most common failure here (the launchd services are down).
             case .cannotConnectToHost, .cannotFindHost, .networkConnectionLost, .dnsLookupFailed:
                 throw FreshRSSError.unreachable("connection refused")
             case .timedOut:

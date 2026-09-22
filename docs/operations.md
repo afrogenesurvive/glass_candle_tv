@@ -66,11 +66,11 @@ Writes to `private/backups/`:
 
 Retention: `BACKUP_KEEP_DAYS`, default 30.
 
-Natively this is a plain `tar` of a folder. There is no VM disk image to go through and no
-`docker run` needed to extract a volume — you can open the result in Finder. The freshrss
-service is stopped for the duration: its SQLite database runs in write-ahead-log mode, and
-copying the files mid-write risks a torn snapshot. A clean shutdown checkpoints the WAL
-first. The outage is a few seconds.
+The archive is a plain `tar` of a folder, so you can open it in Finder, browse it, or
+extract a single file without any special tooling. The freshrss service is stopped for the
+duration: its SQLite database runs in write-ahead-log mode, and copying the files mid-write
+risks a torn snapshot. A clean shutdown checkpoints the WAL first. The outage is a few
+seconds.
 
 > **The OPML export is the portable artefact.** An archive restores *this* instance; an
 > OPML restores your subscriptions into anything. Get one from the web UI

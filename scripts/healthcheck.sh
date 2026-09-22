@@ -239,12 +239,22 @@ API_URL="$(freshrss_api_url)"
 if [ ! -d "$FRESHRSS_DIR/data/users" ]; then
   skip "FreshRSS API: no user yet — complete setup in the browser first"
 else
-  CODE="$(http_code "$API_URL/" 10)"
+  # Probe a real API route. The bare endpoint is not a usable probe: `/` has too
+  # few path segments, so FreshRSS answers 400 before it ever consults the
+  # api_enabled flag — which made this check report the same thing whether the API
+  # was on, off, or broken.
+  #
+  #   /reader/api/0/token  ->  401  API enabled; the request carried no credential
+  #                            503  API disabled ("Allow API access" is off)
+  #                            200  API enabled and answering anonymous requests
+  CODE="$(http_code "$API_URL/reader/api/0/token" 10)"
   case "$CODE" in
-    200) pass "FreshRSS API endpoint reachable" ;;
-    503) fail "FreshRSS API returned 503 — enable 'Allow API access' under Authentication" ;;
-    000) fail "FreshRSS API not reachable at $API_URL" ;;
-    *)   note "FreshRSS API returned HTTP $CODE" ;;
+    401|403) pass "FreshRSS API enabled (unauthenticated request rejected with $CODE)" ;;
+    200)     pass "FreshRSS API reachable" ;;
+    503)     fail "FreshRSS API returned 503 — enable 'Allow API access', or run: php cli/reconfigure.php --api-enabled" ;;
+    400)     fail "FreshRSS API returned 400 for a valid route — unexpected" ;;
+    000)     fail "FreshRSS API not reachable at $API_URL" ;;
+    *)       note "FreshRSS API returned HTTP $CODE" ;;
   esac
 fi
 

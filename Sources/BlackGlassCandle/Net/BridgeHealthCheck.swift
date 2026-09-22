@@ -1,12 +1,12 @@
 import Foundation
 
-/// Lightweight reachability probe for the RSS-Bridge container.
+/// Lightweight reachability probe for the RSS-Bridge service.
 ///
 /// This is a *liveness* check, not a per-source health check. It answers one
 /// question: "is the bridge host up at all?" That is worth showing because the
 /// two failure modes look identical in the article list —
 ///
-///   - the bridge container is down, so every bridged feed is silently empty
+///   - the bridge service is down, so every bridged feed is silently empty
 ///   - nothing new was published
 ///
 /// — and they need completely different responses from the user.

@@ -19,7 +19,7 @@ VERSION_ARG=""
 for arg in "$@"; do
   case "$arg" in
     --debug) DEBUG_BUILD=1 ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) VERSION_ARG="$arg" ;;
   esac
 done

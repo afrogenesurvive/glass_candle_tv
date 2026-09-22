@@ -181,7 +181,7 @@ struct SettingsView: View {
                     .textSelection(.enabled)
             }
 
-            Text("Backing up the feed database means snapshotting a Docker volume, which this app cannot do safely from inside the sandbox-free menu bar process. Run scripts/backup.sh from the repository instead, or via the DS-mon style build wrapper.")
+            Text("Backing up means running scripts/backup.sh, which stops FreshRSS just long enough to archive its data folder and a copy of the database into private/backups/, then starts it again. A few seconds of downtime is why that is an out-of-band job rather than something this app triggers.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

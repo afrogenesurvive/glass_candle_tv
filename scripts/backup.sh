@@ -68,10 +68,21 @@ mkdir -p "$ARCHIVE_DIR"
 # RSS-Bridge ROOT, not in its config/ subdirectory — that one is upstream's own
 # tooling (nginx.conf, php-fpm.conf) and contains nothing of ours, so archiving
 # it produced a backup that included junk and omitted the token.
+# Paths are stored relative to private/ so the archive does not embed your home
+# directory. They must therefore be derived from where things actually are rather
+# than written out by hand: the applications live in private/apps/, and one target
+# that names a missing path makes tar fail for the whole archive.
 TARGETS=""
-[ -d "$FRESHRSS_DIR/data" ] && TARGETS="$TARGETS FreshRSS/data"
-[ -f "$RSSBRIDGE_DIR/config.ini.php" ] && TARGETS="$TARGETS rss-bridge/config.ini.php"
-[ -f "$ENV_FILE" ] && TARGETS="$TARGETS env"
+add_target() {
+  case "$1" in
+    "$BGC_PRIVATE"/*) TARGETS="$TARGETS ${1#"$BGC_PRIVATE"/}" ;;
+    *) die "refusing to archive $1 — it is outside $BGC_PRIVATE" ;;
+  esac
+}
+
+if [ -d "$FRESHRSS_DIR/data" ]; then add_target "$FRESHRSS_DIR/data"; fi
+if [ -f "$RSSBRIDGE_DIR/config.ini.php" ]; then add_target "$RSSBRIDGE_DIR/config.ini.php"; fi
+if [ -f "$ENV_FILE" ]; then add_target "$ENV_FILE"; fi
 
 if [ -z "$TARGETS" ]; then
   die "nothing to back up — is FreshRSS installed? ($FRESHRSS_DIR)"
@@ -108,9 +119,21 @@ fi
 # Run from private/ so the paths inside the archive are relative and portable:
 # they do not embed the absolute path of your home directory.
 info "archiving"
-tar czf "$ARCHIVE" -C "$BGC_PRIVATE" \
-  $(for t in $TARGETS; do printf '%s ' "$t"; done) 2>/dev/null \
-  || die "tar failed"
+# tar's own message is the only thing that explains a failure here, so keep it
+# instead of discarding it — and delete the partial archive, because a truncated
+# .tar.gz is indistinguishable from a good one to --list and to restore.
+TAR_ERR="$ARCHIVE_DIR/.tar-error.log"
+if ! tar czf "$ARCHIVE" -C "$BGC_PRIVATE" $TARGETS 2>"$TAR_ERR"; then
+  message="$(tail -n 1 "$TAR_ERR" 2>/dev/null || true)"
+  rm -f "$ARCHIVE" "$TAR_ERR"
+  die "tar failed${message:+: $message}"
+fi
+rm -f "$TAR_ERR"
+
+tar tzf "$ARCHIVE" >/dev/null 2>&1 || {
+  rm -f "$ARCHIVE"
+  die "the archive could not be read back — removed it rather than leave a bad backup"
+}
 
 chmod 600 "$ARCHIVE"
 ok "$(basename "$ARCHIVE")  ($(human_bytes "$(wc -c < "$ARCHIVE" | tr -d ' ')"))"

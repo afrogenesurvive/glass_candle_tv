@@ -122,12 +122,14 @@ Requirements that the upstream scaffold omits and that this plan adds:
 > ⚠️ **Account creation is skipped when the credentials are blank.** `install.sh` creates
 > the admin account from `ADMIN_EMAIL` + `ADMIN_PASSWORD` in `private/env`. Leave either
 > blank and it skips that step entirely: the services start normally, the API stays
-> unusable, and the menu bar app reports "Password rejected". There is no volume to
+> unusable, and the menu bar app reports "Password rejected". There is nothing to
 > recreate — fill the values in and re-run `./scripts/install.sh`. Afterwards, change the
 > account in the web UI; the env values are not re-applied on later runs.
 >
-> The **"Allow API access"** toggle is separate and manual. `install.sh` sets the API
-> password (`cli/create-user.php --api-password`) but nothing can set `api_enabled` — the
+> The **"Allow API access"** toggle is separate from the API password. `install.sh` sets the
+> password (`cli/create-user.php --api-password`); the toggle is `api_enabled`, which is a
+> *system* setting — it can be set in the web UI or from the command line with
+> `php cli/reconfigure.php --api-enabled`. The
 > API returns 503 until the toggle is on, even with the password already stored.
 
 Categories to create: `Tech`, `Reading`, `Forums`, `Video`, `Social`, `Media`
@@ -191,7 +193,7 @@ This is the workstream that delivers the actual goal. WS1–WS5 are plumbing.
 | Item | Detail |
 | --- | --- |
 | Deliverables | `scripts/backup.sh`, `scripts/restore.sh`, `scripts/upgrade.sh`, `scripts/healthcheck.sh` |
-| Acceptance | A backup restored into a **clean** volume reproduces every subscription and category |
+| Acceptance | A backup restored into a **clean** `data/` directory reproduces every subscription and category |
 | Runbook | [`operations.md`](./operations.md) |
 
 ---
@@ -205,12 +207,12 @@ whose section markers all read as pending is indistinguishable from one that is 
 | --- | --- | --- |
 | WS0 | Repository skeleton | ✅ done |
 | WS1 | Native service infrastructure | 🟡 both services running on loopback; the `refresh` agent was failing on every run (macOS privacy restriction on the repo's location) and was fixed by relocating the repository |
-| WS2 | FreshRSS configuration | ⬜ not started — no admin account yet, so the API returns 400 |
+| WS2 | FreshRSS configuration | 🟡 API access **enabled and verified** (`401`, not `503`); admin login still locked, so the API cannot authenticate yet |
 | WS3 | RSS-Bridge configuration | 🟡 token auth verified; the allowlist was inert until `enabled_bridges[]` was moved under `[system]` |
 | WS4 | Source onboarding | ⬜ 0 of 11 checklist steps; blocked on the feed list (input A6) |
 | WS5 | Menu bar application | 🟡 builds and launches; acceptance not yet exercised, and it cannot pass until WS2 completes |
-| WS6 | Taming the flow | ⬜ blocked on WS4 |
-| WS7 | Operations | 🟡 scripts complete and corrected; no backup has been taken, so the restore acceptance is still unrunnable |
+| WS6 | Taming the flow | ⬜ blocked on WS4; note that FreshRSS 1.30 has no category-level hide or mute, so §4's per-category treatments must be applied per feed |
+| WS7 | Operations | 🟡 scripts complete; the first backup now exists, but the restore acceptance is still unrun |
 
 ```mermaid
 graph LR

@@ -146,7 +146,7 @@ unless you click the feed directly.
 | --- | --- |
 | Purpose | Video-shaped layout for YouTube feeds; DeArrow-style thumbnails; miniplayer; blocks Shorts |
 | Requires | **FreshRSS ≥ 1.30.0** |
-| Install | `./scripts/install-youlag.sh` (drops `xExtension-Youlag` into `freshrss-extensions/`), then enable in Settings → Extensions |
+| Install | `./scripts/install-youlag.sh` (drops `xExtension-Youlag` into the FreshRSS clone's `extensions/` directory), then enable in Settings → Extensions |
 | Update | Delete the folder, re-run the script |
 | License | GPL-3.0 |
 

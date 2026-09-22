@@ -33,12 +33,6 @@
 #     └── backups/             snapshots from scripts/backup.sh
 private/
 
-# Legacy Docker-era paths, kept so an old checkout cannot leak if it is ever
-# revived. Harmless if the directories do not exist.
-rss-bridge-config/
-freshrss-extensions/
-freshrss-data/
-
 # -----------------------------------------------------------------------------
 # 1. SECRETS — must never be committed
 # -----------------------------------------------------------------------------
@@ -61,15 +55,13 @@ secrets/
 *.p12
 *.kdbx
 
-# RSS-Bridge holds its instance token + bridge credentials in here.
-# The .example template IS committed; the live file is not.
-rss-bridge-config/config.ini.php
+# RSS-Bridge holds its instance token + bridge credentials in the file at its
+# application root. The .example template IS committed; the live file is not.
 **/config.ini.php
 !**/config.ini.php.example
 
-# FreshRSS may be bind-mounted for debugging; it holds config.php + the SQLite DB
-# (which contains the user table and API password hash).
-freshrss-data/
+# The FreshRSS clone's data/ holds config.php + the SQLite DB, which contains the
+# user table and the API password hash.
 **/config.php
 **/config-user.custom.php
 **/users/*/config.php
@@ -84,14 +76,7 @@ backups/
 !docs/**/*.tar.gz
 
 # -----------------------------------------------------------------------------
-# 3. Vendored third-party (re-installed by scripts/install-youlag.sh)
-# -----------------------------------------------------------------------------
-freshrss-extensions/*
-!freshrss-extensions/.gitkeep
-!freshrss-extensions/README.md
-
-# -----------------------------------------------------------------------------
-# 4. Swift build products (menubar app)
+# 3. Swift build products (menubar app)
 # -----------------------------------------------------------------------------
 .build/
 build/
@@ -101,15 +86,14 @@ build/
 xcuserdata/
 
 # -----------------------------------------------------------------------------
-# 5. Docker / runtime state
+# 4. Runtime state
 # -----------------------------------------------------------------------------
-docker-compose.override.yml
 *.log
 logs/
 .pids/
 
 # -----------------------------------------------------------------------------
-# 6. macOS
+# 5. macOS
 # -----------------------------------------------------------------------------
 .DS_Store
 ._*
